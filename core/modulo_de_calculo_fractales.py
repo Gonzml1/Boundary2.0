@@ -1,17 +1,13 @@
 import cupy as cp
 import numpy as np
-import matplotlib.pyplot as plt
+
 import time 
 from OpenGL.GL import *
 from .funciones_kernel import *
-import os
 from functools import wraps
-import ctypes
-from gui.MandelbrotGUI import Ui_Boundary
-from scipy.special import gamma
 #from  .coimport mandelbrot
 from .backend_cpp import *
-import glfw
+from gui.MandelbrotGUI import Ui_Boundary
 
 # cp.exp((z[matriz]**2 - 1.00001*z[matriz]) / C[matriz]**4) 
 # z[matriz] = z[matriz]**2 + C[matriz]    
@@ -59,7 +55,7 @@ class calculos_mandelbrot:
 #        self.x_cp = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
 #        self.y_cp = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
         if self.ui is not None:
-            self._llenar_combo_fractales()
+            self._llenar_combo_fractales()  
 
     def _llenar_combo_fractales(self) -> None:
 
@@ -74,11 +70,13 @@ class calculos_mandelbrot:
             primer_fractal = next(iter(FRACTAL_REGISTRY))
             for calc in FRACTAL_REGISTRY[primer_fractal]:
                 self.ui.tipo_calculo_comboBox.addItem(calc)
-
+        
+         
         self.ui.tipo_fractal_comboBox.currentTextChanged.connect(
             self._on_fractal_cambiado
         )
-    
+        
+
     def _on_fractal_cambiado(self, nombre_fractal: str) -> None:
         """
         Se ejecuta cuando el usuario elige otro fractal;
@@ -234,7 +232,6 @@ class calculos_mandelbrot:
         resultado_cpu = resultado.get()
 
         tiempo = time.time() - inicio
-        print(f"{self.max_iter} iteraciones")
         print(f"Tiempo total: {tiempo:.5f} segundos")
 
         return resultado_cpu
@@ -282,7 +279,6 @@ class calculos_mandelbrot:
         resultado = resultado.reshape((self.height, self.width))
         resultado_cpu = resultado.get()
         tiempo = time.time() - inicio
-        print(f"{self.max_iter} iteraciones")
         print(f"Tiempo total: {tiempo:.5f} segundos")
 
         return resultado_cpu
@@ -328,7 +324,6 @@ class calculos_mandelbrot:
         resultado_cpu = resultado.get()
 
         tiempo = time.time() - inicio
-        print(f"{self.max_iter} iteraciones")
         print(f"Tiempo total: {tiempo:.5f} segundos")
 
         return resultado_cpu
@@ -373,7 +368,6 @@ class calculos_mandelbrot:
         root_index = root_index.reshape((self.height, self.width))
         root_index_cpu = root_index.get()
         tiempo = time.time() - inicio
-        print(f"{self.max_iter} iteraciones")
         print(f"Tiempo total: {tiempo:.5f} segundos")
 
         return root_index_cpu

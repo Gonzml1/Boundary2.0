@@ -13,6 +13,8 @@ import matplotlib.pyplot as plt
 from PyQt5.QtCore import QTimer
 PALETTE_REGISTRY: list[tuple[str, Callable[[np.ndarray], np.ndarray]]] = []
 
+
+
 def register_palette(palette_name: str) -> Callable[[Callable[[np.ndarray], np.ndarray]], Callable[[np.ndarray], np.ndarray]]:
     """
     Decorador que registra (nombre, función) en PALETTE_REGISTRY.
@@ -68,18 +70,25 @@ class MandelbrotWidget(QOpenGLWidget):
         self.thickness = 10 + 5 * np.sin(self.t_actual * 0.5)
         self._generar_malla_base()
         self.fluido_activo = False
-        # --- SISTEMA DE DEBOUNCING Y PREVISUALIZACIÓN ---
+
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
         self.render_timer.timeout.connect(self.ejecutar_alta_resolucion)
         self.is_preview_mode = False
+        
+        self.resolucion_adaptativa_activa = True
 
     def interaccion_rapida(self):
-        """Activa el modo de baja resolución y reinicia el reloj."""
-        self.is_preview_mode = True
-        self.render_timer.stop()
-        self.update() # Llama a paintGL forzando la baja calidad
-        self.render_timer.start(1000) # 1 segundo (1000ms) de inactividad para renderizar full HD
+            if self.resolucion_adaptativa_activa:
+                # Comportamiento normal: bajamos la calidad y arrancamos el reloj
+                self.is_preview_mode = True
+                self.render_timer.stop()
+                self.update() 
+                self.render_timer.start(1000) 
+            else:
+                # Sistema desactivado: renderizamos todo al máximo nivel siempre
+                self.is_preview_mode = False
+                self.update()
 
     def ejecutar_alta_resolucion(self):
         """Restaura la calidad al máximo cuando el usuario deja de moverse."""
@@ -437,7 +446,9 @@ class MandelbrotWidget(QOpenGLWidget):
             self.mostrar_parametros(
                 self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter, self.clase_equiv
             )
-            self.update()
+            
+            self.interaccion_rapida()
+            
     
     def pixel_a_complejo(self, x, y):
         real = self.xmin + (x / self.width) * (self.xmax - self.xmin)
@@ -468,23 +479,22 @@ class MandelbrotWidget(QOpenGLWidget):
             if str(self.ui.generador_comboBox.currentText()) == "Sucesion":
                 glClear(GL_COLOR_BUFFER_BIT)
                 glLoadIdentity()
-    
+
                 # 1) Actualizar parámetros base desde la UI
                 self.actualizar_parametros()
-    
+
                 # --- SISTEMA DE RESOLUCIÓN ADAPTATIVA ---
                 factor_escala = 1.0
-                if getattr(self, 'is_preview_mode', False):
+                if getattr(self, 'is_preview_mode', False) or getattr(self, 'modo_baja_res_fijo', False):
                     factor_escala = 4.0  # Calcula 16 veces menos píxeles para volar a máximos FPS
                     self.mandelbrot.width = int(self.width / factor_escala)
                     self.mandelbrot.height = int(self.height / factor_escala)
-                    self.mandelbrot.max_iter = min(30, self.max_iter) # Tope estricto de iteraciones
-                    
+
                 # 2) Definir malla dinámica según la resolución calculada
                 x = np.linspace(self.xmin, self.xmax, self.mandelbrot.width)
                 y = np.linspace(self.ymin, self.ymax, self.mandelbrot.height)
                 X, Y = np.meshgrid(x, y)
-    
+
                 if getattr(self, 'fluido_activo', False):
                     # Aplicamos la deformación sobre las matrices de tamaño adaptativo
                     angle = 2 * np.pi * (X + Y + 0.1 * np.sin(self.t_actual))
@@ -492,21 +502,21 @@ class MandelbrotWidget(QOpenGLWidget):
                     Z = (X + r * np.cos(angle)) + 1j * (Y + r * np.sin(angle))
                 else:
                     Z = X + 1j * Y
-    
+
                 self.mandelbrot.Z = Z
-    
+
                 # 4) Calcular el fractal
                 try:
                     data = self.mandelbrot.calcular_fractal()
                 except Exception as e:
                     print(f"Error al calcular el fractal: {e}")
                     return
-    
+
                 # 5) Normalizar y colorear (usando la iteración adaptativa)
                 norm = data / self.mandelbrot.max_iter 
                 name, func = self.palettes[self.palette_index]
                 rgb = func(norm)[::-1, :, :]
-    
+
                 # 6) Dibujar estirando los píxeles mágicamente con OpenGL
                 glPixelZoom(factor_escala, factor_escala)
                 glDrawPixels(self.mandelbrot.width, self.mandelbrot.height, GL_RGB, GL_UNSIGNED_BYTE, rgb)
@@ -530,7 +540,7 @@ class MandelbrotWidget(QOpenGLWidget):
         
         self.actualizar_parametros()
         self.mostrar_parametros(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter, self.clase_equiv)
-        self.update()
+        self.interaccion_rapida()
 
     def mousePressEvent(self, event):
         
@@ -548,7 +558,7 @@ class MandelbrotWidget(QOpenGLWidget):
             self.ymax = c_y + (self.ymax - c_y) * self.zoom_in
             self.actualizar_parametros()
             self.mostrar_parametros(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter, self.clase_equiv)
-            self.update()
+            self.interaccion_rapida()
             
         elif event.button() == Qt.RightButton:
 
@@ -565,7 +575,7 @@ class MandelbrotWidget(QOpenGLWidget):
             
             self.actualizar_parametros()
             self.mostrar_parametros(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter, self.clase_equiv)
-            self.update()
+            self.interaccion_rapida()
 
         elif event.button() == Qt.MiddleButton:
             self.dragging = True
@@ -585,22 +595,22 @@ class MandelbrotWidget(QOpenGLWidget):
             if event.key() in (Qt.Key_Left, Qt.Key_A):
                 self.xmin -= dx
                 self.xmax -= dx
-                self.update()
+                self.interaccion_rapida()
                 
             elif event.key() in (Qt.Key_Right, Qt.Key_D):
                 self.xmin += dx
                 self.xmax += dx
-                self.update()
+                self.interaccion_rapida()
                 
             elif event.key() in (Qt.Key_Up, Qt.Key_W):
                 self.ymin -= dy
                 self.ymax -= dy
-                self.update()
+                self.interaccion_rapida()
                 
             elif event.key() in (Qt.Key_Down, Qt.Key_S):
                 self.ymin += dy
                 self.ymax += dy
-                self.update()
+                self.interaccion_rapida()
 
             elif event.key() == Qt.Key_Plus:
                 # Calcular el punto central actual
@@ -617,7 +627,7 @@ class MandelbrotWidget(QOpenGLWidget):
                 self.actualizar_parametros()
                 self.mostrar_parametros(self.xmin, self.xmax, self.ymin, self.ymax,
                                         self.width, self.height, self.max_iter, self.clase_equiv)
-                self.update()
+                self.interaccion_rapida()
                 
             elif event.key() == Qt.Key_Minus:
                 c_x = (self.xmin + self.xmax) / 2
@@ -633,7 +643,7 @@ class MandelbrotWidget(QOpenGLWidget):
                 self.actualizar_parametros()
                 self.mostrar_parametros(self.xmin, self.xmax, self.ymin, self.ymax,
                                         self.width, self.height, self.max_iter, self.clase_equiv)
-                self.update()
+                self.interaccion_rapida()
                 
             elif event.key() == Qt.Key_P:    
                 self.next_palette()
@@ -659,7 +669,17 @@ class MandelbrotWidget(QOpenGLWidget):
                 self.fluido_activo = not self.fluido_activo
                 # para que se repinte inmediatamente:
                 self.update()
-
+            elif event.key() == Qt.Key_Q:
+                self.resolucion_adaptativa_activa = not self.resolucion_adaptativa_activa
+                
+                estado = "ACTIVADA (Baja calidad al moverse)" if self.resolucion_adaptativa_activa else "DESACTIVADA (Siempre máxima calidad)"
+                print(f"Resolución adaptativa: {estado}")
+                
+                # Si acabamos de apagar el sistema, frenamos el reloj y forzamos alta resolución
+                if not self.resolucion_adaptativa_activa:
+                    self.is_preview_mode = False
+                    self.render_timer.stop()
+                    self.update()
             
         if str(self.ui.generador_comboBox.currentText()) == "Lsystem":
             if event.key() == Qt.Key_Plus:

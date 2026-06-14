@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_Boundary()
         self.ui.setupUi(self)
+        
 
         # Tema oscuro
         ts.tema_oscuro(QtWidgets.QApplication.instance())
@@ -83,7 +84,7 @@ class MainWindow(QMainWindow):
         self.ui.graphicsView.setInteractive(True)
 
         # ComboBox por defecto
-        self.ui.tipo_calculo_comboBox.setCurrentIndex(2)
+        self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
         self.ui.formula_entrada.setText("z**2 + c")
         
         # --- NUEVA CONEXIÓN DE LA ESCENA ---

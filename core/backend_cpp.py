@@ -76,93 +76,6 @@ free_newton = _newton_cpp.wrap_func(
     'free_newton', [ctypes.POINTER(ctypes.c_int)], None
 )
 
-_tricorn_cpp = CPPBackend('tricorn.dll')
-tricorn_cpp = _tricorn_cpp.wrap_func(
-    'tricorn',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_tricorn = _tricorn_cpp.wrap_func(
-    'free_tricorn', [ctypes.POINTER(ctypes.c_int)], None
-)
-
-_phoenix_cpp = CPPBackend('phoenix.dll')
-phoenix_cpp = _phoenix_cpp.wrap_func(
-    'phoenix',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int,
-     ctypes.c_double, ctypes.c_double],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_phoenix = _phoenix_cpp.wrap_func(
-    'free_phoenix', [ctypes.POINTER(ctypes.c_int)], None
-)
-
-_burning_julia_cpp = CPPBackend('burning_julia.dll')
-burning_julia_cpp = _burning_julia_cpp.wrap_func(
-    'burning_julia',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int,
-     ctypes.c_double, ctypes.c_double],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_burning_julia = _burning_julia_cpp.wrap_func(
-    'free_burning_julia', [ctypes.POINTER(ctypes.c_int)], None
-)
-
-_nova_cpp = CPPBackend('nova.dll')
-nova_cpp = _nova_cpp.wrap_func(
-    'nova',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int,
-     ctypes.c_double, ctypes.c_double],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_nova = _nova_cpp.wrap_func(
-    'free_nova', [ctypes.POINTER(ctypes.c_int)], None
-)
-
-_coseno_cpp = CPPBackend('coseno.dll')
-coseno_cpp = _coseno_cpp.wrap_func(
-    'coseno',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_coseno = _coseno_cpp.wrap_func(
-    'free_coseno', [ctypes.POINTER(ctypes.c_int)], None
-)
-
-_coseno_inv_cpp = CPPBackend('coseno_inv.dll')
-coseno_inv_cpp = _coseno_inv_cpp.wrap_func(
-    'coseno_inv',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_coseno_inv = _coseno_inv_cpp.wrap_func(
-    'free_coseno_inv', [ctypes.POINTER(ctypes.c_int)], None
-)
-
-_celtic_cpp = CPPBackend('celtic_mandelbrot.dll')
-celtic_mandelbrot_cpp = _celtic_cpp.wrap_func(
-    'celtic_mandelbrot',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_celtic_mandelbrot = _celtic_cpp.wrap_func(
-    'free_celtic_mandelbrot', [ctypes.POINTER(ctypes.c_int)], None
-)
-
 _circulo_cpp = CPPBackend('circulo.dll')
 circulo_cpp = _circulo_cpp.wrap_func(
     'circulo',
@@ -175,18 +88,4 @@ free_circulo = _circulo_cpp.wrap_func(
     'free_circulo', [ctypes.POINTER(ctypes.c_int)], None
 )
 
-_pertubacion_cpp = CPPBackend('pertubacion.dll')
-pertubacion_cpp = _pertubacion_cpp.wrap_func(
-    'pertubacion',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_pertubacion = _pertubacion_cpp.wrap_func(
-    'free_pertubacion', [ctypes.POINTER(ctypes.c_int)], None
-)
-# Otros backends (coseno, burning_ship, etc.) se pueden agregar igual:
-# _coseno_cpp = CPPBackend('coseno.dll')
-# coseno_cpp = _coseno_cpp.wrap_func('coseno', [...], ctypes.POINTER(ctypes.c_int))
-# free_coseno = _coseno_cpp.wrap_func('free_coseno', [ctypes.POINTER(ctypes.c_int)], None)
+
