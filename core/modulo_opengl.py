@@ -84,7 +84,7 @@ class MandelbrotWidget(QOpenGLWidget):
                 self.is_preview_mode = True
                 self.render_timer.stop()
                 self.update() 
-                self.render_timer.start(1000) 
+                self.render_timer.start(500) 
             else:
                 # Sistema desactivado: renderizamos todo al máximo nivel siempre
                 self.is_preview_mode = False
