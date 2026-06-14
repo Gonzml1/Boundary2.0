@@ -32,8 +32,7 @@ def register_fractal(fractal: str, calc: str) -> callable:
 class calculos_mandelbrot:
     def __init__(self, xmin: float, xmax: float , ymin: float, ymax: float, 
                  width: int, height: int, max_iter: int, formula: str, 
-                 tipo_calculo: str, tipo_fractal: str, real: float, imag: float , 
-                 ui=None) -> None:
+                 tipo_calculo: str, tipo_fractal: str, real: float, imag: float) -> None:
         self.xmin = xmin
         self.xmax = xmax
         self.ymin = ymin
@@ -48,44 +47,41 @@ class calculos_mandelbrot:
         self.imag = imag
         self.x_np = np.linspace(self.xmin, self.xmax, self.width, dtype=np.float64)
         self.y_np = np.linspace(self.ymin, self.ymax, self.height, dtype=np.float64)
-        self.ui   = ui
         self.p  = 1.0
         self.nova_m = 1.0
         self.nova_k = 1.0
 #        self.x_cp = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
 #        self.y_cp = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
-        if self.ui is not None:
-            self._llenar_combo_fractales()  
 
     def _llenar_combo_fractales(self) -> None:
+            # Desconectamos temporalmente para evitar eventos no deseados al limpiar
+            try:
+                self.ui.tipo_fractal_comboBox.currentTextChanged.disconnect()
+            except TypeError:
+                pass
 
-        # Primero, limpias el comboBox por las dudas:
-        self.ui.tipo_fractal_comboBox.clear()
-        self.ui.tipo_calculo_comboBox.clear()
+            self.ui.tipo_fractal_comboBox.clear()
+            self.ui.tipo_calculo_comboBox.clear()
 
-        for fractal in FRACTAL_REGISTRY:
-            self.ui.tipo_fractal_comboBox.addItem(fractal)
+            # Cargamos los fractales directamente
+            self.ui.tipo_fractal_comboBox.addItems(list(FRACTAL_REGISTRY.keys()))
 
-        if FRACTAL_REGISTRY:
-            primer_fractal = next(iter(FRACTAL_REGISTRY))
-            for calc in FRACTAL_REGISTRY[primer_fractal]:
-                self.ui.tipo_calculo_comboBox.addItem(calc)
-        
-         
-        self.ui.tipo_fractal_comboBox.currentTextChanged.connect(
-            self._on_fractal_cambiado
-        )
-        
+            if FRACTAL_REGISTRY:
+                primer_fractal = self.ui.tipo_fractal_comboBox.currentText()
+                if primer_fractal in FRACTAL_REGISTRY:
+                    self.ui.tipo_calculo_comboBox.addItems(list(FRACTAL_REGISTRY[primer_fractal].keys()))
+                    self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
+            
+            # Reconectamos la señal
+            self.ui.tipo_fractal_comboBox.currentTextChanged.connect(self._on_fractal_cambiado)
 
     def _on_fractal_cambiado(self, nombre_fractal: str) -> None:
-        """
-        Se ejecuta cuando el usuario elige otro fractal;
-        recarga el combo de 'cálculos' según lo registrado.
-        """
         self.ui.tipo_calculo_comboBox.clear()
+        
         if nombre_fractal in FRACTAL_REGISTRY:
-            for calc in FRACTAL_REGISTRY[nombre_fractal]:
-                self.ui.tipo_calculo_comboBox.addItem(calc)
+            self.ui.tipo_calculo_comboBox.addItems(list(FRACTAL_REGISTRY[nombre_fractal].keys()))
+            # Forzamos la selección del primer método de cálculo
+            self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
     
     @staticmethod
     def medir_tiempo(nombre) -> callable:

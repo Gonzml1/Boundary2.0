@@ -6,6 +6,7 @@ import core.funciones_ui as md
 import gui.tema_oscuro as ts
 from gui.MandelbrotGUI import Ui_Boundary
 from OpenGL.GL import *
+from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY
 
 class Punto(QGraphicsEllipseItem):
     def __init__(self, callback):
@@ -94,6 +95,18 @@ class MainWindow(QMainWindow):
         # Foco directo al graphicsView original
         self.ui.graphicsView.setFocus()
 
+    def inicializar_combos(self):
+        self.ui.tipo_fractal_comboBox.clear()
+        self.ui.tipo_fractal_comboBox.addItems(FRACTAL_REGISTRY.keys())
+        
+        # Conectar el cambio
+        self.ui.tipo_fractal_comboBox.currentTextChanged.connect(self.actualizar_combo_calculo)
+
+    def actualizar_combo_calculo(self, fractal):
+        self.ui.tipo_calculo_comboBox.clear()
+        if fractal in FRACTAL_REGISTRY:
+            self.ui.tipo_calculo_comboBox.addItems(FRACTAL_REGISTRY[fractal].keys())
+            
     def actualizar_coordenadas(self, x, y):
         x_real = (x / 100) * 2 - 2
         y_real = -((y / 100) * 2 - 2)

@@ -47,7 +47,7 @@ class MandelbrotWidget(QOpenGLWidget):
         self.zoom_factor    =       1.0
         self.dragging       =       False
         self.last_pos       =       None
-        self.mandelbrot     =       calculos_mandelbrot(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter,self.formula, self.tipo_calculo, self.tipo_fractal, self.real, self.imag, self.ui)                               
+        self.mandelbrot     =       calculos_mandelbrot(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter,self.formula, self.tipo_calculo, self.tipo_fractal, self.real, self.imag)                               
         self.lsystem        =       None  
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
