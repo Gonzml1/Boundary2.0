@@ -53,36 +53,6 @@ class calculos_mandelbrot:
 #        self.x_cp = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
 #        self.y_cp = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
 
-    def _llenar_combo_fractales(self) -> None:
-            # Desconectamos temporalmente para evitar eventos no deseados al limpiar
-            try:
-                self.ui.tipo_fractal_comboBox.currentTextChanged.disconnect()
-            except TypeError:
-                pass
-
-            self.ui.tipo_fractal_comboBox.clear()
-            self.ui.tipo_calculo_comboBox.clear()
-
-            # Cargamos los fractales directamente
-            self.ui.tipo_fractal_comboBox.addItems(list(FRACTAL_REGISTRY.keys()))
-
-            if FRACTAL_REGISTRY:
-                primer_fractal = self.ui.tipo_fractal_comboBox.currentText()
-                if primer_fractal in FRACTAL_REGISTRY:
-                    self.ui.tipo_calculo_comboBox.addItems(list(FRACTAL_REGISTRY[primer_fractal].keys()))
-                    self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
-            
-            # Reconectamos la señal
-            self.ui.tipo_fractal_comboBox.currentTextChanged.connect(self._on_fractal_cambiado)
-
-    def _on_fractal_cambiado(self, nombre_fractal: str) -> None:
-        self.ui.tipo_calculo_comboBox.clear()
-        
-        if nombre_fractal in FRACTAL_REGISTRY:
-            self.ui.tipo_calculo_comboBox.addItems(list(FRACTAL_REGISTRY[nombre_fractal].keys()))
-            # Forzamos la selección del primer método de cálculo
-            self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
-    
     @staticmethod
     def medir_tiempo(nombre) -> callable:
         """
@@ -160,6 +130,13 @@ class calculos_mandelbrot:
             expression = expression.replace(var, f"{var}[{mask_name}]")
         return expression
 
+
+    def _generar_malla_compleja_gpu(self):
+        x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
+        y = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
+        X, Y = cp.meshgrid(x, y)
+        return (X + 1j * Y).ravel()
+    
     ##############
     # Mandelbrot #
     ##############
@@ -167,10 +144,7 @@ class calculos_mandelbrot:
     @register_fractal("Mandelbrot", "GPU_Cupy_kernel")
     @medir_tiempo("Mandelbrot GPU")
     def hacer_mandelbrot_gpu(self) -> np.ndarray:
-        x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
-        y = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
-        X, Y = cp.meshgrid(x, y)
-        C = X + 1j * Y  
+        C = self._generar_malla_compleja_gpu()
         C = C.ravel() 
         
         resultado = cp.empty(C.shape, dtype=cp.int32)
@@ -178,8 +152,7 @@ class calculos_mandelbrot:
         try:
             mandelbrot_kernel(C, self.max_iter, resultado)
         except Exception as e:
-            print(f"Error executing Julia kernel: {e}")
-            return None
+            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
             
         resultado = resultado.reshape((self.height, self.width))
         resultado_cpu = resultado.get()
@@ -208,10 +181,7 @@ class calculos_mandelbrot:
     def hacer_julia_gpu(self) -> np.ndarray:
         inicio = time.time()
 
-        x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
-        y = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
-        X, Y = cp.meshgrid(x, y)
-        Z = X + 1j * Y  
+        Z = self._generar_malla_compleja_gpu()
         Z = Z.ravel()   
 
         C = cp.full(Z.shape, complex(self.real, self.imag), dtype=cp.complex128)
@@ -221,8 +191,7 @@ class calculos_mandelbrot:
         try:
             julia_kernel(Z, C, self.max_iter, resultado)
         except Exception as e:
-            print(f"Error executing Julia kernel: {e}")
-            return None
+            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
 
         resultado = resultado.reshape((self.height, self.width))
         resultado_cpu = resultado.get()
@@ -256,10 +225,7 @@ class calculos_mandelbrot:
     def hacer_burning_gpu(self) -> np.ndarray:
         inicio = time.time()
 
-        x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
-        y = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
-        X, Y = cp.meshgrid(x, y)
-        C = X + 1j * Y  
+        C = self._generar_malla_compleja_gpu()
         Z = cp.zeros_like(C, dtype=cp.complex128)  
         C = C.ravel()
         Z = Z.ravel()
@@ -269,8 +235,8 @@ class calculos_mandelbrot:
         try:
             burning_kernel(Z, C, self.max_iter, resultado)
         except Exception as e:
-            print(f"Error executing Burning Ship kernel: {e}")
-            return None
+            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
+            
 
         resultado = resultado.reshape((self.height, self.width))
         resultado_cpu = resultado.get()
@@ -301,10 +267,7 @@ class calculos_mandelbrot:
     def hacer_circulo_gpu(self) -> np.ndarray:
         inicio = time.time()
 
-        x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
-        y = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
-        X, Y = cp.meshgrid(x, y)
-        C = X + 1j * Y  
+        C = self._generar_malla_compleja_gpu()
         C = C.ravel()   
         Z = cp.zeros_like(C, dtype=cp.complex128)  
 
@@ -313,8 +276,7 @@ class calculos_mandelbrot:
         try:
             circulo_kernel(Z, C, self.max_iter, resultado)
         except Exception as e:
-            print(f"Error executing Circulo kernel: {e}")
-            return None
+            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
 
         resultado = resultado.reshape((self.height, self.width))
         resultado_cpu = resultado.get()
@@ -345,11 +307,7 @@ class calculos_mandelbrot:
     @register_fractal("Newton-Raphson", "GPU_Cupy_kernel")
     def hacer_newton_gpu(self) -> np.ndarray:
         inicio = time.time()
-
-        x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
-        y = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
-        X, Y = cp.meshgrid(x, y)
-        C = X + 1j * Y
+        C = self._generar_malla_compleja_gpu()
         C = C.ravel()
 
         root_index = cp.empty(C.shape, dtype=cp.int32)
@@ -358,8 +316,7 @@ class calculos_mandelbrot:
         try:
             newton_kernel(C, self.max_iter, root_index, iter_count)
         except Exception as e:
-            print(f"Error ejecutando el kernel de Newton: {e}")
-            return None
+            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
 
         root_index = root_index.reshape((self.height, self.width))
         root_index_cpu = root_index.get()

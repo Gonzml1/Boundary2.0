@@ -3,3 +3,7 @@ __pycache__/
 venv/
 env/
 .env
+*.dll
+*.exe
+*.a
+*.o

@@ -508,8 +508,11 @@ class MandelbrotWidget(QOpenGLWidget):
                 # 4) Calcular el fractal
                 try:
                     data = self.mandelbrot.calcular_fractal()
-                except Exception as e:
-                    print(f"Error al calcular el fractal: {e}")
+                except RuntimeError as e:
+                    print(e)
+                    # Aquí puedes pintar la pantalla de un color sólido para indicar error
+                    glClearColor(1.0, 0.0, 0.0, 1.0) 
+                    glClear(GL_COLOR_BUFFER_BIT)
                     return
 
                 # 5) Normalizar y colorear (usando la iteración adaptativa)

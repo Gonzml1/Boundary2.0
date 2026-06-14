@@ -53,7 +53,6 @@ class MainWindow(QMainWindow):
         self.ui = Ui_Boundary()
         self.ui.setupUi(self)
         
-
         # Tema oscuro
         ts.tema_oscuro(QtWidgets.QApplication.instance())
 
@@ -84,8 +83,6 @@ class MainWindow(QMainWindow):
         self.ui.graphicsView.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
         self.ui.graphicsView.setInteractive(True)
 
-        # ComboBox por defecto
-        self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
         self.ui.formula_entrada.setText("z**2 + c")
         
         # --- NUEVA CONEXIÓN DE LA ESCENA ---
@@ -94,10 +91,24 @@ class MainWindow(QMainWindow):
 
         # Foco directo al graphicsView original
         self.ui.graphicsView.setFocus()
-
+        
+        # Inicializar combos dinámicos
+        self.inicializar_combos()
+        
     def inicializar_combos(self):
+        # Desconectar señal temporalmente para evitar ejecuciones indeseadas
+        try:
+            self.ui.tipo_fractal_comboBox.currentTextChanged.disconnect()
+        except TypeError:
+            pass
+
         self.ui.tipo_fractal_comboBox.clear()
-        self.ui.tipo_fractal_comboBox.addItems(FRACTAL_REGISTRY.keys())
+        self.ui.tipo_fractal_comboBox.addItems(list(FRACTAL_REGISTRY.keys()))
+        
+        # Forzar la carga inicial de los métodos de cálculo para el primer fractal
+        if self.ui.tipo_fractal_comboBox.count() > 0:
+            primer_fractal = self.ui.tipo_fractal_comboBox.currentText()
+            self.actualizar_combo_calculo(primer_fractal)
         
         # Conectar el cambio
         self.ui.tipo_fractal_comboBox.currentTextChanged.connect(self.actualizar_combo_calculo)
@@ -105,8 +116,11 @@ class MainWindow(QMainWindow):
     def actualizar_combo_calculo(self, fractal):
         self.ui.tipo_calculo_comboBox.clear()
         if fractal in FRACTAL_REGISTRY:
-            self.ui.tipo_calculo_comboBox.addItems(FRACTAL_REGISTRY[fractal].keys())
-            
+            self.ui.tipo_calculo_comboBox.addItems(list(FRACTAL_REGISTRY[fractal].keys()))
+            # Forzamos la selección del índice 0
+            if self.ui.tipo_calculo_comboBox.count() > 0:
+                self.ui.tipo_calculo_comboBox.setCurrentIndex(0)
+
     def actualizar_coordenadas(self, x, y):
         x_real = (x / 100) * 2 - 2
         y_real = -((y / 100) * 2 - 2)
@@ -116,14 +130,10 @@ class MainWindow(QMainWindow):
 
     # --- NUEVAS FUNCIONES PARA EL MANEJO DE RESOLUCIÓN ---
     def al_interactuar(self, *args):
-            """Se ejecuta constantemente mientras arrastras el punto rojo de la miniatura."""
-            self.mandelbrot.interaccion_rapida()
+        """Se ejecuta constantemente mientras arrastras el punto rojo de la miniatura."""
+        self.mandelbrot.interaccion_rapida()
 
     def renderizar_alta_resolucion(self):
         """Se ejecuta solo cuando pasaron 2 segundos sin que el usuario haga nada."""
-        # MODO ALTA CALIDAD:
-        # Aquí le avisas a OpenGL que use toda la potencia (más iteraciones, antialiasing, etc)
-        # Ejemplo imaginario: self.mandelbrot.set_iteraciones(500)
-        
-        print("Renderizando alta resolución...") # Para que veas en consola que funciona
+        print("Renderizando alta resolución...") 
         self.mandelbrot.update()
