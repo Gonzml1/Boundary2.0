@@ -1,0 +1,585 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>Boundary</class>
+ <widget class="QMainWindow" name="Boundary">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1303</width>
+    <height>659</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Boundary</string>
+  </property>
+  <property name="windowIcon">
+   <iconset>
+    <normaloff>../Iconos/assets2Ftask_01jsfxefnefwvtb960bws6yaa72Fimg_0.png</normaloff>../Iconos/assets2Ftask_01jsfxefnefwvtb960bws6yaa72Fimg_0.png</iconset>
+  </property>
+  <property name="autoFillBackground">
+   <bool>false</bool>
+  </property>
+  <widget class="QWidget" name="centralwidget">
+   <widget class="QWidget" name="verticalLayoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>1130</x>
+      <y>220</y>
+      <width>160</width>
+      <height>356</height>
+     </rect>
+    </property>
+    <layout class="QVBoxLayout" name="verticalLayout">
+     <item>
+      <widget class="QLabel" name="label_paso">
+       <property name="text">
+        <string>Paso</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="paso_entrada">
+       <property name="text">
+        <string>0.1</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="xmax_label">
+       <property name="text">
+        <string>xmax</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="xmax_entrada">
+       <property name="text">
+        <string>1.2</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="ymax_label">
+       <property name="text">
+        <string>ymax</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="ymax_entrada">
+       <property name="text">
+        <string>0.9</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="width_label">
+       <property name="text">
+        <string>Ancho</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="width_entrada">
+       <property name="text">
+        <string>1000</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="high_label">
+       <property name="text">
+        <string>Alto</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="high_entrada">
+       <property name="text">
+        <string>600</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="max_iter_label">
+       <property name="text">
+        <string>Iteraciones</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="max_iter_entrada">
+       <property name="text">
+        <string>256</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="horizontalLayout">
+       <item>
+        <widget class="QPushButton" name="boton_duplicar">
+         <property name="text">
+          <string>x2</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="boton_dividir">
+         <property name="text">
+          <string>/2</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+     <item>
+      <widget class="QSlider" name="slider_iteraciones">
+       <property name="maximum">
+        <number>512</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QWidget" name="layoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>980</x>
+      <y>220</y>
+      <width>131</width>
+      <height>396</height>
+     </rect>
+    </property>
+    <layout class="QVBoxLayout" name="verticalLayout_2">
+     <item>
+      <widget class="QLabel" name="xmin_label">
+       <property name="text">
+        <string>xmin</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="xmin_entrada">
+       <property name="text">
+        <string>-2</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="ymin_label">
+       <property name="text">
+        <string>ymin</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="ymin_entrada">
+       <property name="text">
+        <string>-0.9</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="formula_label">
+       <property name="text">
+        <string>Formula</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="formula_entrada">
+       <property name="text">
+        <string>z = z**2 + C</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="zoom_out_factor_label">
+       <property name="text">
+        <string>Zoom out factor</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="zoom_out_factor_entrada">
+       <property name="text">
+        <string>2.0</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="zoom_in_factor_label">
+       <property name="text">
+        <string>Zoom in factor</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="zoom_in_factor_entrada">
+       <property name="text">
+        <string>0.5</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="exponente_label">
+       <property name="text">
+        <string>Exponente</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QSlider" name="horizontalSlider">
+       <property name="maximum">
+        <number>20</number>
+       </property>
+       <property name="sliderPosition">
+        <number>2</number>
+       </property>
+       <property name="orientation">
+        <enum>Qt::Horizontal</enum>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="label_n_nova">
+       <property name="text">
+        <string>n nova</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="n_nova"/>
+     </item>
+     <item>
+      <widget class="QLabel" name="label_m_nova">
+       <property name="text">
+        <string>m nova</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="m_nova"/>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QWidget" name="layoutWidget_2">
+    <property name="geometry">
+     <rect>
+      <x>830</x>
+      <y>220</y>
+      <width>141</width>
+      <height>378</height>
+     </rect>
+    </property>
+    <layout class="QVBoxLayout" name="verticalLayout_4">
+     <item>
+      <widget class="QLabel" name="generador_label">
+       <property name="text">
+        <string>Tipo de generador</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="generador_comboBox">
+       <item>
+        <property name="text">
+         <string>Sucesion</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Lsystem</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="tipo_fractal_label">
+       <property name="text">
+        <string>Tipo de fractal</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="tipo_fractal_comboBox">
+       <item>
+        <property name="text">
+         <string>Mandelbrot</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Julia</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Burning Ship</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Tricorn</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Circulo</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>Newton-Raphson</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="tipo_calculo_label">
+       <property name="text">
+        <string>Tipo de Calculo</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="tipo_calculo_comboBox"/>
+     </item>
+     <item>
+      <widget class="QLabel" name="cmap_label">
+       <property name="text">
+        <string>Elegir cmap</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QComboBox" name="cmap_comboBox">
+       <item>
+        <property name="text">
+         <string>twilight_shifted</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>twilight</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>inferno</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>viridis</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>plasma</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>magma</string>
+        </property>
+       </item>
+       <item>
+        <property name="text">
+         <string>cividis</string>
+        </property>
+       </item>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="real_julia_label">
+       <property name="text">
+        <string>Parte real de julia</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="real_julia_entrada">
+       <property name="text">
+        <string>0</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="im_julia_label">
+       <property name="text">
+        <string>Parte im de julia</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="im_julia_entrada">
+       <property name="text">
+        <string>0</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="label">
+       <property name="text">
+        <string>Clase de equiv</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLineEdit" name="clase_equiv_entrada">
+       <property name="text">
+        <string>256</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <layout class="QHBoxLayout" name="horizontalLayout_2">
+       <item>
+        <widget class="QPushButton" name="boton_duplicar_clase_equiv">
+         <property name="text">
+          <string>x2</string>
+         </property>
+        </widget>
+       </item>
+       <item>
+        <widget class="QPushButton" name="boton_dividir_clase_equiv">
+         <property name="text">
+          <string>/2</string>
+         </property>
+        </widget>
+       </item>
+      </layout>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QWidget" name="layoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>830</x>
+      <y>10</y>
+      <width>141</width>
+      <height>161</height>
+     </rect>
+    </property>
+    <layout class="QVBoxLayout" name="verticalLayout_3">
+     <item>
+      <widget class="QLabel" name="hacer_fractal_label">
+       <property name="text">
+        <string>Generar Fractal</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="boton_hacer_fractal">
+       <property name="text">
+        <string>Generar</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="guardar_label">
+       <property name="text">
+        <string>Guardar mandelbrot</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="boton_guardar">
+       <property name="text">
+        <string>Guardar</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QLabel" name="resetear_label">
+       <property name="text">
+        <string>Resetear</string>
+       </property>
+      </widget>
+     </item>
+     <item>
+      <widget class="QPushButton" name="boton_resetear">
+       <property name="text">
+        <string>Reset</string>
+       </property>
+      </widget>
+     </item>
+    </layout>
+   </widget>
+   <widget class="QOpenGLWidget" name="grafico_openGLWidget">
+    <property name="geometry">
+     <rect>
+      <x>10</x>
+      <y>10</y>
+      <width>800</width>
+      <height>600</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_coordenadas">
+    <property name="geometry">
+     <rect>
+      <x>20</x>
+      <y>20</y>
+      <width>441</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+   </widget>
+   <widget class="QGraphicsView" name="graphicsView">
+    <property name="geometry">
+     <rect>
+      <x>980</x>
+      <y>10</y>
+      <width>200</width>
+      <height>200</height>
+     </rect>
+    </property>
+   </widget>
+   <widget class="QLabel" name="label_coordenadas2">
+    <property name="geometry">
+     <rect>
+      <x>1130</x>
+      <y>590</y>
+      <width>141</width>
+      <height>16</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string/>
+    </property>
+   </widget>
+   <widget class="QLineEdit" name="p_nova">
+    <property name="geometry">
+     <rect>
+      <x>1190</x>
+      <y>170</y>
+      <width>113</width>
+      <height>22</height>
+     </rect>
+    </property>
+   </widget>
+  </widget>
+  <widget class="QMenuBar" name="menubar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1303</width>
+     <height>22</height>
+    </rect>
+   </property>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
