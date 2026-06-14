@@ -68,13 +68,29 @@ class MandelbrotWidget(QOpenGLWidget):
         self.thickness = 10 + 5 * np.sin(self.t_actual * 0.5)
         self._generar_malla_base()
         self.fluido_activo = False
-        
+        # --- SISTEMA DE DEBOUNCING Y PREVISUALIZACIÓN ---
+        self.render_timer = QTimer(self)
+        self.render_timer.setSingleShot(True)
+        self.render_timer.timeout.connect(self.ejecutar_alta_resolucion)
+        self.is_preview_mode = False
 
-    
+    def interaccion_rapida(self):
+        """Activa el modo de baja resolución y reinicia el reloj."""
+        self.is_preview_mode = True
+        self.render_timer.stop()
+        self.update() # Llama a paintGL forzando la baja calidad
+        self.render_timer.start(1000) # 1 segundo (1000ms) de inactividad para renderizar full HD
+
+    def ejecutar_alta_resolucion(self):
+        """Restaura la calidad al máximo cuando el usuario deja de moverse."""
+        self.is_preview_mode = False
+        self.update()
+
     def _generar_malla_base(self):
         x = np.linspace(self.xmin, self.xmax, self.width)
         y = np.linspace(self.ymin, self.ymax, self.height)
         self.X_base, self.Y_base = np.meshgrid(x, y)    
+
     ######################
     # Paletas de colores #
     ######################
@@ -106,237 +122,6 @@ class MandelbrotWidget(QOpenGLWidget):
 
         rgb = np.stack([r.clip(0,1), g.clip(0,1), b.clip(0,1)], axis=-1)
         return (rgb * 255).astype(np.uint8)
-    
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Cian→Magenta→Amarillo")
-    def _paleta_inferno(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'inferno' de Matplotlib (una paleta predefinida).
-        """
-        iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
-        cycle = self.clase_equiv
-        mod = iters % cycle
-        cmap = cm.get_cmap('inferno', cycle)
-        lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-        return lut[mod]
-    
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Viridis")
-    def _paleta_viridis(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'viridis' de Matplotlib (verde-amarillo-azul oscuro).
-        """
-        cmap = cm.get_cmap('viridis', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)  # (256,3)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]  # (H, W, 3)
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Plasma")
-    def _paleta_plasma(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'plasma' de Matplotlib (magenta-naranja-amarillo).
-        """
-        cmap = cm.get_cmap('plasma', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Magma")
-    def _paleta_magma(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'magma' de Matplotlib (negros-rosas-rojos).
-        """
-        cmap = cm.get_cmap('magma', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Cividis")
-    def _paleta_cividis(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'cividis' de Matplotlib (amarillo-azul verdoso, enfoque en perceptibilidad).
-        """
-        cmap = cm.get_cmap('cividis', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Coolwarm")
-    def _paleta_coolwarm(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'coolwarm' de Matplotlib (azul frío a rojo cálido).
-        """
-        cmap = cm.get_cmap('coolwarm', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Spring")
-    def _paleta_spring(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'spring' de Matplotlib (magenta a amarillo).
-        """
-        cmap = cm.get_cmap('spring', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Summer")
-    def _paleta_summer(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'summer' de Matplotlib (verde claro a amarillo).
-        """
-        cmap = cm.get_cmap('summer', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Autumn")
-    def _paleta_autumn(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'autumn' de Matplotlib (rojo a amarillo).
-        """
-        cmap = cm.get_cmap('autumn', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-    
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Winter")
-    def _paleta_winter(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'winter' de Matplotlib (verde azulado a azul).
-        """
-        cmap = cm.get_cmap('winter', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    #@register_palette("Jet")
-    def _paleta_jet(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'jet' clásico (azul-cian-verde-amarillo-rojo).
-        """
-        cmap = cm.get_cmap('jet', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-   #@register_palette("Twilight Shifted")
-    def _paleta_twilight_shifted(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'twilight_shifted' de Matplotlib (cambia de púrpura a amarillo).
-        """
-        cmap = cm.get_cmap('twilight_shifted', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-    
-    #@register_palette("Turbo")
-    def _paleta_turbo(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'turbo' de Matplotlib (espectro de colores vibrantes).
-        """
-        cmap = cm.get_cmap('turbo', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-    
-    #@register_palette("Rainbow")
-    def _paleta_rainbow(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'rainbow' de Matplotlib (arcoíris).
-        """
-        cmap = cm.get_cmap('rainbow', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-    
-    #@register_palette("Ocean")
-    def _paleta_ocean(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'ocean' de Matplotlib (azul marino a verde).
-        """
-        cmap = cm.get_cmap('ocean', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-    
-    #@register_palette("Pink")
-    def _paleta_pink(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'pink' de Matplotlib (rosa claro).
-        """
-        cmap = cm.get_cmap('pink', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-    
-#    @register_palette("Escape Speed")
-    def _paleta_escape_speed_from_norm(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Paleta según rapidez de escape, aplicable a `norm` (valores en [0,1]):
-        - Escape rápido (norm bajo) → tonos cálidos
-        - Escape lento (norm alto) → tonos fríos
-
-        Parámetros:
-        - norm: array H×W con M/max_iter, valores en [0,1]
-
-        Devuelve:
-        - Array uint8 (H, W, 3) con los valores RGB.
-        """
-        # 1) Invertir para que norm bajo = rápido = índice alto
-        inv = np.clip(1 - norm, 0, 1)
-        # 2) Construir LUT de 256 colores (p.ej. 'inferno')
-        cmap = cm.get_cmap('inferno', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        # 3) Mapear inv [0,1] → índices 0–255
-        indices = (inv * 255).astype(np.uint8)
-        # 4) Devolver RGB
-        return lut[indices]
-
-    # se queda, para proximamente implementar clase de equiv
-    #@register_palette("Cubehelix")
-    def _paleta_cubehelix(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'cubehelix' de Matplotlib (perceptualmente uniforme,
-        ideal para resaltar detalle). Muestreamos 1024 colores.
-        """
-        # 1) Generamos un LUT de 1024 entradas
-        cmap = cm.get_cmap('cubehelix', 1024)
-        lut = (cmap(np.linspace(0, 1, 1024))[:, :3] * 255).astype(np.uint8)  # (1024, 3)
-
-        # 2) Mapear norm ∈ [0,1] a índices 0..1023
-        indices = np.uint16((norm * 1023).clip(0, 1023))  # shape=(H,W), valores 0–1023
-
-        # 3) Indexar la LUT
-        return lut[indices]  # shape=(H, W, 3), dtype=uint8
-    
-    #@register_palette("Spectral")
-    def _paleta_spectral(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'Spectral' de Matplotlib (divergente, multicolor).
-        """
-        cmap = cm.get_cmap('Spectral', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
-
-    #@register_palette("RdYlBu")
-    def _paleta_rdyalbu(self, norm: np.ndarray) -> np.ndarray:
-        """
-        Colormap 'RdYlBu' de Matplotlib (divergente rojo→amarillo→azul).
-        """
-        cmap = cm.get_cmap('RdYlBu', 256)
-        lut = (cmap(np.arange(256))[:, :3] * 255).astype(np.uint8)
-        indices = np.uint8((norm * 255).clip(0, 255))
-        return lut[indices]
 
     @register_palette("Iteracion varibales (YlGnBu variable)")
     def _paleta_ylgnbu(self, norm: np.ndarray) -> np.ndarray:
@@ -680,45 +465,52 @@ class MandelbrotWidget(QOpenGLWidget):
     
     
     def paintGL(self):
-        if str(self.ui.generador_comboBox.currentText()) == "Sucesion":
-            glClear(GL_COLOR_BUFFER_BIT)
-            glLoadIdentity()
-
-            # 1) Actualizar parámetros
-            self.actualizar_parametros()
-
-            # 2) Definir malla según modo fluido o estático
-            if getattr(self, 'fluido_activo', False):
-                X_def, Y_def = self._campo_deformacion(self.t_actual)
-                Z = X_def + 1j * Y_def
-            else:
-                x = np.linspace(self.xmin, self.xmax, self.width)
-                y = np.linspace(self.ymin, self.ymax, self.height)
+            if str(self.ui.generador_comboBox.currentText()) == "Sucesion":
+                glClear(GL_COLOR_BUFFER_BIT)
+                glLoadIdentity()
+    
+                # 1) Actualizar parámetros base desde la UI
+                self.actualizar_parametros()
+    
+                # --- SISTEMA DE RESOLUCIÓN ADAPTATIVA ---
+                factor_escala = 1.0
+                if getattr(self, 'is_preview_mode', False):
+                    factor_escala = 4.0  # Calcula 16 veces menos píxeles para volar a máximos FPS
+                    self.mandelbrot.width = int(self.width / factor_escala)
+                    self.mandelbrot.height = int(self.height / factor_escala)
+                    self.mandelbrot.max_iter = min(30, self.max_iter) # Tope estricto de iteraciones
+                    
+                # 2) Definir malla dinámica según la resolución calculada
+                x = np.linspace(self.xmin, self.xmax, self.mandelbrot.width)
+                y = np.linspace(self.ymin, self.ymax, self.mandelbrot.height)
                 X, Y = np.meshgrid(x, y)
-                Z = X + 1j * Y
-
-            # 3) Actualizar malla Z en el objeto mandelbrot
-            self.mandelbrot.Z = Z
-
-            # 4) Calcular el fractal en la malla Z
-            try:
-                data = self.mandelbrot.calcular_fractal()
-            except Exception as e:
-                print(f"Error al calcular el fractal: {e}")
-                return
-
-            # 5) Normalizar y colorear
-            norm = data / self.max_iter
-            name, func = self.palettes[self.palette_index]
-            rgb = func(norm)[::-1, :, :]
-
-            # 6) Dibujar
-            glDrawPixels(self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE, rgb)
-
-        elif str(self.ui.generador_comboBox.currentText()) == "Lsystem":
-            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-            glLoadIdentity()
-            self.draw_branch(0.0, -0.9, 90, 0.3, 15)
+    
+                if getattr(self, 'fluido_activo', False):
+                    # Aplicamos la deformación sobre las matrices de tamaño adaptativo
+                    angle = 2 * np.pi * (X + Y + 0.1 * np.sin(self.t_actual))
+                    r = 0.002 * self.thickness * np.cos(3 * np.pi * Y + self.t_actual)
+                    Z = (X + r * np.cos(angle)) + 1j * (Y + r * np.sin(angle))
+                else:
+                    Z = X + 1j * Y
+    
+                self.mandelbrot.Z = Z
+    
+                # 4) Calcular el fractal
+                try:
+                    data = self.mandelbrot.calcular_fractal()
+                except Exception as e:
+                    print(f"Error al calcular el fractal: {e}")
+                    return
+    
+                # 5) Normalizar y colorear (usando la iteración adaptativa)
+                norm = data / self.mandelbrot.max_iter 
+                name, func = self.palettes[self.palette_index]
+                rgb = func(norm)[::-1, :, :]
+    
+                # 6) Dibujar estirando los píxeles mágicamente con OpenGL
+                glPixelZoom(factor_escala, factor_escala)
+                glDrawPixels(self.mandelbrot.width, self.mandelbrot.height, GL_RGB, GL_UNSIGNED_BYTE, rgb)
+                glPixelZoom(1.0, 1.0) # Restaurar la escala para el próximo frame
 
             
     def resizeGL(self, w, h):

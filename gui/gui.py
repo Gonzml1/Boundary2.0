@@ -102,18 +102,8 @@ class MainWindow(QMainWindow):
 
     # --- NUEVAS FUNCIONES PARA EL MANEJO DE RESOLUCIÓN ---
     def al_interactuar(self, *args):
-        """Se ejecuta constantemente mientras arrastras el punto o te mueves."""
-        # 1. Reiniciamos el reloj para que no dispare la alta resolución todavía
-        self.render_timer.stop()
-        
-        # 2. MODO PREVISUALIZACIÓN:
-        # Aquí debes pasarle alguna variable a tu código OpenGL (md) para que baje la calidad
-        # Ejemplo imaginario: self.mandelbrot.set_iteraciones(20) 
-        # O si tu OpenGL ya es rápido, simplemente actualizas:
-        self.mandelbrot.update()
-        
-        # 3. Arrancamos la cuenta regresiva de 2 segundos (2000 milisegundos)
-        self.render_timer.start(2000)
+            """Se ejecuta constantemente mientras arrastras el punto rojo de la miniatura."""
+            self.mandelbrot.interaccion_rapida()
 
     def renderizar_alta_resolucion(self):
         """Se ejecuta solo cuando pasaron 2 segundos sin que el usuario haga nada."""
