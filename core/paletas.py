@@ -1,6 +1,6 @@
 import numpy as np
-import matplotlib
 from matplotlib import cm
+
 def register_palette(name):
     """
     Decorator to register a color palette function.

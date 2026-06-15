@@ -26,7 +26,7 @@ def register_palette(palette_name: str) -> Callable[[Callable[[np.ndarray], np.n
     return deco
 
 class MandelbrotWidget(QOpenGLWidget):
-    def __init__(self,cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, real, imag, zoom_in, zoom_out, boundary=Ui_Boundary):
+    def __init__(self,cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal,zoom_in, zoom_out, boundary=Ui_Boundary):
         super().__init__()
         self.cmap           =       cmap    
         self.xmin           =       xmin
@@ -39,16 +39,14 @@ class MandelbrotWidget(QOpenGLWidget):
         self.formula        =       formula
         self.tipo_calculo   =       tipo_calculo
         self.tipo_fractal   =       tipo_fractal
-        self.real           =       real
-        self.imag           =       imag
         self.ui             =       boundary
         self.zoom_in        =       zoom_in
         self.zoom_out       =       zoom_out
         self.zoom_factor    =       1.0
         self.dragging       =       False
         self.last_pos       =       None
-        self.mandelbrot     =       calculos_mandelbrot(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter,self.formula, self.tipo_calculo, self.tipo_fractal, self.real, self.imag)                               
-        self.lsystem        =       None  
+        self.mandelbrot     =       calculos_mandelbrot(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter,self.formula, self.tipo_calculo, self.tipo_fractal)                               
+
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.ui.boton_hacer_fractal.clicked.connect(lambda : self.update())
@@ -63,13 +61,6 @@ class MandelbrotWidget(QOpenGLWidget):
         self.palette_index = 0
         self.ui.boton_guardar.clicked.connect(lambda: self.guardar_imagen())
         self.linkeo_botones()
-#        self.timer = QTimer()
-#        self.timer.timeout.connect(self._tick_animacion_color)
-#        self.timer.start(30)  # 30 ms ≈ 33 fps
-        self.t_actual = 0.0  # tiempo interno
-        self.thickness = 10 + 5 * np.sin(self.t_actual * 0.5)
-        self._generar_malla_base()
-        self.fluido_activo = False
 
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
@@ -94,25 +85,11 @@ class MandelbrotWidget(QOpenGLWidget):
         """Restaura la calidad al máximo cuando el usuario deja de moverse."""
         self.is_preview_mode = False
         self.update()
-
-    def _generar_malla_base(self):
-        x = np.linspace(self.xmin, self.xmax, self.width)
-        y = np.linspace(self.ymin, self.ymax, self.height)
-        self.X_base, self.Y_base = np.meshgrid(x, y)    
+  
 
     ######################
     # Paletas de colores #
     ######################
-    def _campo_deformacion(self, t):
-        # Campo de flujo tipo vórtice
-        angle = 2 * np.pi * (self.X_base + self.Y_base + 0.1 * np.sin(t))
-        r = 0.002 * self.thickness * np.cos(3 * np.pi * self.Y_base + t)
-
-        dX = r * np.cos(angle)
-        dY = r * np.sin(angle)
-
-        return self.X_base + dX, self.Y_base + dY
-    # se queda, para proximamente implementar clase de equiv
     
     @register_palette("Iteraciones variables (Bandas RGB variable)")
     def _paleta_bandas_rgb_equiv(self, norm: np.ndarray) -> np.ndarray:
@@ -191,97 +168,8 @@ class MandelbrotWidget(QOpenGLWidget):
         cycle = self.clase_equiv
         cmap = cm.get_cmap('twilight_shifted', cycle)
         lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-        return lut[iters % cycle]
-        
-    @register_palette("Iteraciones variables (Twilight Shifted animada)")
-    def _paleta_iters_variable_twilight_animada(self, norm: np.ndarray) -> np.ndarray:
-        iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
-        cycle = self.clase_equiv
-        offset = int((self.t_actual * 20) % cycle)  # campo de velocidad temporal
-        cmap = cm.get_cmap('twilight_shifted', cycle)
-        lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-        return lut[(iters + offset) % cycle]
-    
-    @register_palette("Campo turbulento animado")
-    def _paleta_flujo_turbulento(self, norm: np.ndarray) -> np.ndarray:
-        iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
-        cycle = self.clase_equiv
+        return lut[iters % cycle]     
 
-        # Obtenemos coordenadas normalizadas
-        h, w = norm.shape
-        y, x = np.meshgrid(np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij")
-
-        # Campo de desplazamiento tipo vórtice suave
-        ang = 2 * np.pi * (x + y + 0.5 * np.sin(self.t_actual))
-        mag = self.thickness * 0.5 * np.cos(3 * np.pi * y + self.t_actual)
-
-        # Offset local por campo
-        offset = np.int32(mag * np.sin(ang + self.t_actual) * cycle / (2 * np.pi))
-
-        # Aplicamos el desplazamiento al índice de color
-        indices = (iters + offset) % cycle
-
-        # LUT
-        cmap = cm.get_cmap('twilight_shifted', cycle)
-        lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-
-        return lut[indices]
-    
-    @register_palette("Colores fractalizados con clase_equiv (Julia)")
-    def _paleta_colores_fractalizados_equiv(self, norm: np.ndarray) -> np.ndarray:
-        # Preparamos LUT base
-        cycle = self.clase_equiv
-        cmap = cm.get_cmap('twilight_shifted', cycle)
-        lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-
-        # Iteraciones enteras para clase de equivalencia
-        iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
-        base_idx = iters % cycle  # clase de equivalencia (como antes)
-
-        # Creamos variable compleja para cada pixel a partir del índice base
-        z = (base_idx / cycle) * 2 - 1 + 1j * np.sin(base_idx / cycle * 6.28 + self.t_actual) * 0.5
-
-        # Dinámica fractal (Julia simple)
-        c = complex(-0.4, 0.6)
-        for _ in range(3):  # iteramos 10 veces
-            z = z**2 + c
-
-        # Ángulo → índice de color
-        ang = np.angle(z)  # ∈ (-π, π)
-        final_idx = np.mod(np.int32(((ang + np.pi) / (2 * np.pi)) * cycle), cycle)
-
-        return lut[final_idx]
-
-    
-#    @register_palette("Flujo fractalizado horizontal")
-    def _paleta_flujo_fractal_horizontal(self, norm: np.ndarray) -> np.ndarray:
-        cycle = self.clase_equiv
-        cmap = cm.get_cmap('twilight_shifted', cycle)
-        lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-
-        # 1. Coordenadas normalizadas (x en [0,1])
-        h, w = norm.shape
-        y, x = np.meshgrid(np.linspace(0, 1, h), np.linspace(0, 1, w), indexing="ij")
-
-        # 2. Campo de flujo + fractal dinámico
-        desplazamiento = self.t_actual * 0.1  # controla velocidad del flujo
-        z = (x - desplazamiento) + 1j * (norm - 0.5)
-
-        # 3. Iteración fractal (tipo Julia)
-        c = complex(-0.4, 0.6)
-        for _ in range(10):  # más iteraciones = más fractalización
-            z = z**2 + c
-
-        # 4. Ángulo → índice de color
-        ang = np.angle(z)
-        idx = np.mod(np.int32(((ang + np.pi) / (2 * np.pi)) * cycle), cycle)
-
-        return lut[idx]
-    # ——— Método para pasar a la siguiente paleta ——
-
-    def _tick_animacion_color(self):
-        self.t_actual += 0.05  # velocidad de animación
-        self.update()
 
     def next_palette(self):
         """
@@ -495,15 +383,9 @@ class MandelbrotWidget(QOpenGLWidget):
                 y = np.linspace(self.ymin, self.ymax, self.mandelbrot.height)
                 X, Y = np.meshgrid(x, y)
 
-                if getattr(self, 'fluido_activo', False):
-                    # Aplicamos la deformación sobre las matrices de tamaño adaptativo
-                    angle = 2 * np.pi * (X + Y + 0.1 * np.sin(self.t_actual))
-                    r = 0.002 * self.thickness * np.cos(3 * np.pi * Y + self.t_actual)
-                    Z = (X + r * np.cos(angle)) + 1j * (Y + r * np.sin(angle))
-                else:
-                    Z = X + 1j * Y
+                    
 
-                self.mandelbrot.Z = Z
+                self.mandelbrot.Z = X + 1j * Y
 
                 # 4) Calcular el fractal
                 try:
@@ -684,9 +566,3 @@ class MandelbrotWidget(QOpenGLWidget):
                     self.render_timer.stop()
                     self.update()
             
-        if str(self.ui.generador_comboBox.currentText()) == "Lsystem":
-            if event.key() == Qt.Key_Plus:
-                self.zoom_factor *= 1.1  # Acercar
-            elif event.key() == Qt.Key_Minus:
-                self.zoom_factor /= 1.1  # Alejar
-            self.update()  # Redibujar la escena

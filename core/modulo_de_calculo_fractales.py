@@ -30,7 +30,7 @@ def register_fractal(fractal: str, calc: str) -> callable:
 class calculos_mandelbrot:
     def __init__(self, xmin: float, xmax: float , ymin: float, ymax: float, 
                  width: int, height: int, max_iter: int, formula: str, 
-                 tipo_calculo: str, tipo_fractal: str, real: float, imag: float) -> None:
+                 tipo_calculo: str, tipo_fractal: str) -> None:
         self.xmin = xmin
         self.xmax = xmax
         self.ymin = ymin
@@ -41,13 +41,9 @@ class calculos_mandelbrot:
         self.formula = formula
         self.tipo_calculo = tipo_calculo
         self.tipo_fractal = tipo_fractal
-        self.real = real
-        self.imag = imag
         self.x_np = np.linspace(self.xmin, self.xmax, self.width, dtype=np.float64)
         self.y_np = np.linspace(self.ymin, self.ymax, self.height, dtype=np.float64)
-        self.p  = 1.0
-        self.nova_m = 1.0
-        self.nova_k = 1.0
+
 
     @staticmethod
     def medir_tiempo(nombre) -> callable:
@@ -97,35 +93,6 @@ class calculos_mandelbrot:
                 return M
             else:
                 raise ValueError(f"Tipo de cálculo '{self.tipo_calculo}' no soportado para el fractal '{self.tipo_fractal}'.")
-
-    @staticmethod
-    def convertir_formula_compleja(formula: str)-> tuple [str, str]:
-        """
-        Convierte una fórmula compleja como 'z**2 + C' en dos fórmulas para partes reales e imaginarias,
-        usando variables zr, zi, Cr, Ci.
-        """
-        # Solo soportamos polinomios y suma con C por ahora.
-        if formula.strip() == "z**2 + C":
-            # (zr + i zi)^2 = (zr^2 - zi^2) + i(2*zr*zi)
-            real_expr = "zr**2 - zi**2 + Cr"
-            imag_expr = "2 * zr * zi + Ci"
-            return real_expr, imag_expr
-        elif formula.strip() == "z**2 + 0":  # Julia con constante embebida
-            real_expr = "zr**2 - zi**2"
-            imag_expr = "2 * zr * zi"
-            return real_expr, imag_expr
-        else:
-            raise NotImplementedError(f"Fórmula no soportada todavía: {formula}")
-    
-    @staticmethod
-    def transformar_expresion(expression: str, variables: str, mask_name :str ="matriz") -> str:
-        """
-        Aplica una máscara a las variables en la expresión.
-        """
-        for var in variables:
-            expression = expression.replace(var, f"{var}[{mask_name}]")
-        return expression
-
 
     def _generar_malla_compleja_gpu(self):
         x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)

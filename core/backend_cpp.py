@@ -83,6 +83,7 @@ circulo_cpp = _circulo_cpp.wrap_func(
      ctypes.c_int, ctypes.c_int, ctypes.c_int],
     ctypes.POINTER(ctypes.c_int)
 )
+
 free_circulo = _circulo_cpp.wrap_func(
     'free_circulo', [ctypes.POINTER(ctypes.c_int)], None
 )
