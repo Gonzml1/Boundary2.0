@@ -261,7 +261,6 @@ class Ui_Boundary(object):
         self.tipo_fractal_comboBox.setItemText(2, _translate("Boundary", "Burning Ship"))
         self.tipo_fractal_comboBox.setItemText(3, _translate("Boundary", "Tricorn"))
         self.tipo_fractal_comboBox.setItemText(4, _translate("Boundary", "Circulo"))
-        self.tipo_fractal_comboBox.setItemText(5, _translate("Boundary", "Newton-Raphson"))
         self.tipo_calculo_label.setText(_translate("Boundary", "Tipo de Calculo"))
         self.cmap_label.setText(_translate("Boundary", "Elegir cmap"))
         self.cmap_comboBox.setItemText(0, _translate("Boundary", "twilight_shifted"))

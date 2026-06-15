@@ -262,45 +262,7 @@ class calculos_mandelbrot:
         img = flat.copy().reshape(self.height, self.width)
         free_circulo(ptr)
         return img
-    
-    ##################
-    # Newton-Raphson #
-    ##################
 
-    @register_fractal("Newton-Raphson", "GPU_Cupy_kernel")
-    def hacer_newton_gpu(self) -> np.ndarray:
-        inicio = time.time()
-        C = self._generar_malla_compleja_gpu()
-        C = C.ravel()
-
-        root_index = cp.empty(C.shape, dtype=cp.int32)
-        iter_count = cp.empty(C.shape, dtype=cp.int32)
-
-        try:
-            newton_kernel(C, self.max_iter, root_index, iter_count)
-        except Exception as e:
-            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
-
-        root_index = root_index.reshape((self.height, self.width))
-        root_index_cpu = root_index.get()
-        tiempo = time.time() - inicio
-        print(f"Tiempo total: {tiempo:.5f} segundos")
-
-        return root_index_cpu
-
-    @register_fractal("Newton-Raphson", "CPU_cpp")
-    @medir_tiempo("Newton CPP")
-    def hacer_newton_cpp2(self) -> np.ndarray:
-        ptr = newton_cpp(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            self.width, self.height,
-            self.max_iter
-        )
-        flat = np.ctypeslib.as_array(ptr, shape=(self.width*self.height,))
-        img = flat.copy().reshape(self.height, self.width)
-        free_newton(ptr)
-        return img
     
     
     

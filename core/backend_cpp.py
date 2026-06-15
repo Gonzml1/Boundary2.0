@@ -63,18 +63,6 @@ free_burning_ship = _burning_ship_cpp.wrap_func(
     'free_burning_ship', [ctypes.POINTER(ctypes.c_int)], None
 )
 
-_newton_cpp = CPPBackend('newton.dll')
-newton_cpp = _newton_cpp.wrap_func(
-    'newton',
-    [ctypes.c_double, ctypes.c_double,
-     ctypes.c_double, ctypes.c_double,
-     ctypes.c_int, ctypes.c_int, ctypes.c_int],
-    ctypes.POINTER(ctypes.c_int)
-)
-free_newton = _newton_cpp.wrap_func(
-    'free_newton', [ctypes.POINTER(ctypes.c_int)], None
-)
-
 _circulo_cpp = CPPBackend('circulo.dll')
 circulo_cpp = _circulo_cpp.wrap_func(
     'circulo',

@@ -3,7 +3,6 @@ from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtCore import Qt
 from OpenGL.GL import *
 from core.modulo_de_calculo_fractales import calculos_mandelbrot
-from math import sin, cos, radians
 from gui.MandelbrotGUI import Ui_Boundary
 from matplotlib import cm
 from typing import Callable
@@ -61,7 +60,7 @@ class MandelbrotWidget(QOpenGLWidget):
         self.palette_index = 0
         self.ui.boton_guardar.clicked.connect(lambda: self.guardar_imagen())
         self.linkeo_botones()
-
+        self.ui.boton_resetear.clicked.connect(lambda: self.reset_view())
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
         self.render_timer.timeout.connect(self.ejecutar_alta_resolucion)
@@ -342,25 +341,6 @@ class MandelbrotWidget(QOpenGLWidget):
         real = self.xmin + (x / self.width) * (self.xmax - self.xmin)
         imag = self.ymin + (y / self.height) * (self.ymax - self.ymin)
         return real, imag
-    
-    def draw_branch(self, x, y, angle, length, depth):
-        if depth == 0:
-            return
-
-        # Aplicar el factor de zoom a la longitud
-        length *= self.zoom_factor
-
-        x2 = x + length * cos(radians(angle))
-        y2 = y + length * sin(radians(angle))
-
-        glBegin(GL_LINES)
-        glVertex2f(x, y)
-        glVertex2f(x2, y2)
-        glEnd()
-
-        # Llamadas recursivas para las ramas izquierda y derecha
-        self.draw_branch(x2, y2, angle - 30, length * 0.7, depth - 1)
-        self.draw_branch(x2, y2, angle + 30, length * 0.7, depth - 1)
     
     
     def paintGL(self):
