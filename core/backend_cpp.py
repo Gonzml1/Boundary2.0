@@ -1,6 +1,5 @@
 import os
 import ctypes
-import numpy as np
 
 DIRECCION_DE_CARPETA = "codigos_cpp"
 # --- Helper para carga de DLLs de fractales C++ ---

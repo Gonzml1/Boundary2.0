@@ -1,13 +1,11 @@
 import cupy as cp
 import numpy as np
-
 import time 
 from OpenGL.GL import *
 from .funciones_kernel import *
 from functools import wraps
 #from  .coimport mandelbrot
 from .backend_cpp import *
-from gui.MandelbrotGUI import Ui_Boundary
 
 # cp.exp((z[matriz]**2 - 1.00001*z[matriz]) / C[matriz]**4) 
 # z[matriz] = z[matriz]**2 + C[matriz]    
@@ -50,8 +48,6 @@ class calculos_mandelbrot:
         self.p  = 1.0
         self.nova_m = 1.0
         self.nova_k = 1.0
-#        self.x_cp = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
-#        self.y_cp = cp.linspace(self.ymin, self.ymax, self.height, dtype=cp.float64)
 
     @staticmethod
     def medir_tiempo(nombre) -> callable:

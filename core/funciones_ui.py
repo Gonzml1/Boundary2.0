@@ -1,9 +1,6 @@
-import core.modulo_de_calculo_fractales as tf
 from gui.MandelbrotGUI import Ui_Boundary
-from PyQt5 import QtGui, QtWidgets
-from PyQt5.QtWidgets import QFileDialog
+from PyQt5 import QtWidgets
 from core.modulo_opengl import MandelbrotWidget
-import matplotlib.pyplot as plt
 from core.modulo_de_calculo_fractales import calculos_mandelbrot
 
 #calcular_fractal(xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, real, imag)
