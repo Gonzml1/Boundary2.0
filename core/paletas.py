@@ -1,17 +1,78 @@
 import numpy as np
 from matplotlib import cm
+from typing import Callable
 
-def register_palette(name):
+PALETTE_REGISTRY: list[tuple[str, Callable]] = []
+
+def register_palette(palette_name: str):
+    def deco(fn):
+        PALETTE_REGISTRY.append((palette_name, fn))
+        return fn
+    return deco
+
+
+@register_palette("Iteracion varibales (YlGnBu variable)")
+def _paleta_ylgnbu(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
-    Decorator to register a color palette function.
+    Colormap 'YlGnBu' de Matplotlib (secuencial amarillo→verde→azul).
     """
-    def decorator(func):
-        func._palette_name = name
-        return func
-    return decorator
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
+    cycle = clase_equiv
+    mod = iters % cycle
+    cmap = cm.get_cmap('YlGnBu', cycle)
+    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
+    return lut[mod]
+
+@register_palette("Iteraciones variables (Viridis variable)")
+def _pallete_iters_variable_viridis(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
+    """
+    - Reconstruye iter ∈ [0..max_iter] desde norm
+    - Usa iter % 64 para indexar un LUT de viridis de clase_equiv colores
+    """
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
+    cycle = clase_equiv
+    mod = iters % cycle
+    cmap = cm.get_cmap('viridis', cycle)
+    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
+    return lut[mod]
+@register_palette("Iteraciones variables (Plasma variable)")
+def _pallete_iters_variable_plasma(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
+    """
+    - Reconstruye iter ∈ [0..max_iter] desde norm
+    - Usa iter % 64 para indexar un LUT de plasma de clase_equiv colores
+    """
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
+    cycle = clase_equiv
+    cmap= cm.get_cmap('plasma', cycle)
+    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
+    return lut[iters % cycle]
+@register_palette("Iteraciones variables (Grises)")
+def _pallete_iters_variable_grises(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
+    """
+    - Reconstruye iter ∈ [0..max_iter] desde norm
+    - Usa iter % 64 para indexar un LUT de grises cíclico de clase_equiv colores
+    """
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
+    cycle = clase_equiv
+    mod = iters % cycle
+    gray = np.uint8(((mod.astype(float) / (cycle - 1)) * 255).clip(0, 255))
+    return np.dstack([gray, gray, gray])
+
+@register_palette("Iteraciones variables (Twilight Shifted)")
+def _paleta_iters_variable_twilight(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
+    """
+    - Reconstruye iter ∈ [0..max_iter] desde norm
+    - Usa iter % 512 para indexar un LUT de twilight_shifted de 512 colores
+    """
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
+    cycle = clase_equiv
+    cmap = cm.get_cmap('twilight_shifted', cycle)
+    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
+    return lut[iters % cycle]     
+
 
 @register_palette("Rojo→Amarillo→Blanco")
-def _paleta_rojo_amarillo(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_rojo_amarillo(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Rojo→Amarillo→Blanco:
     - R siempre 255
@@ -24,7 +85,7 @@ def _paleta_rojo_amarillo(self, norm: np.ndarray) -> np.ndarray:
     return np.dstack([r, g, b])
 
 @register_palette("HSV")
-def _paleta_hsv(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_hsv(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Usa el colormap 'hsv' de Matplotlib:
     - Crea una LUT de 256 colores HSV→RGB y para cada valor de norm indexa a la LUT.
@@ -38,7 +99,7 @@ def _paleta_hsv(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]                                # shape=(H,W,3), dtype=uint8
 
 @register_palette("Púrpura Psicodélica")
-def _paleta_psicodelica(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_psicodelica(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Púrpura psicodélica usando funciones sinusoidales:
     - Tres ciclos de color, fases desplazadas en R,G,B
@@ -50,7 +111,7 @@ def _paleta_psicodelica(self, norm: np.ndarray) -> np.ndarray:
     return np.dstack([r, g, b])
     
 @register_palette("Accent")
-def _paleta_accent(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_accent(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Accent' de Matplotlib (colores brillantes).
     """
@@ -60,7 +121,7 @@ def _paleta_accent(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Dark2")
-def _paleta_dark2(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_dark2(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Dark2' de Matplotlib (colores oscuros y saturados).
     """
@@ -70,7 +131,7 @@ def _paleta_dark2(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Set1")
-def _paleta_set1(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_set1(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Set1' de Matplotlib (colores brillantes y saturados).
     """
@@ -80,7 +141,7 @@ def _paleta_set1(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Set2")
-def _paleta_set2(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_set2(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Set2' de Matplotlib (colores suaves y agradables).
     """
@@ -90,7 +151,7 @@ def _paleta_set2(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Set3")
-def _paleta_set3(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_set3(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Set3' de Matplotlib (colores variados y agradables).
     """
@@ -100,7 +161,7 @@ def _paleta_set3(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("prism")
-def _paleta_prism(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_prism(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'prism' de Matplotlib (colores suaves y claros).
     """
@@ -110,7 +171,7 @@ def _paleta_prism(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Prism LUT")
-def _palette_prism_from_norm(self, norm: np.ndarray) -> np.ndarray:
+def _palette_prism_from_norm(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Devuelve un array H×W×3 de uint8 con la paleta 'prism',
     usando un LUT de 256 colores, a partir de norm (valores en [0,1]).
@@ -123,7 +184,7 @@ def _palette_prism_from_norm(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Paired")
-def _paleta_paired(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_paired(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Paired' de Matplotlib (cualitativo, pares de colores contrastantes).
     """
@@ -133,7 +194,7 @@ def _paleta_paired(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Pastel1")
-def _paleta_pastel1(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_pastel1(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Colormap 'Pastel1' de Matplotlib (cualitativo, colores suaves).
     """
@@ -143,14 +204,14 @@ def _paleta_pastel1(self, norm: np.ndarray) -> np.ndarray:
     return lut[indices]
 
 @register_palette("Iteraciones (HSV ciclo 64)")
-def _paleta_iters_hsv(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_iters_hsv(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Paleta basada en el número de iteraciones:
     - Convertimos norm [0,1] de vuelta a iter (0..max_iter)
     - Tomamos iter % 64 para indexar 64 colores HSV
     """
     # Reconstruir el entero de iteración
-    iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
     cycle = 64
     # Generar LUT HSV de 64 colores
     hsv_lut = cm.get_cmap('hsv', cycle)(np.arange(cycle))[:, :3]
@@ -160,14 +221,14 @@ def _paleta_iters_hsv(self, norm: np.ndarray) -> np.ndarray:
 
 
 @register_palette("Grises cíclico")
-def _paleta_grises_ciclico(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_grises_ciclico(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Grises cíclico basado en iteraciones:
     - Reconstruye iters ∈ [0..max_iter] desde norm
     - Toma iters % cycle para definir la intensidad de gris
     """
     # 1) Reconstruir el conteo de iteraciones
-    iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
     # 2) Definir ciclo de, por ejemplo, 64 pasos
     cycle = 64
     mod = iters % cycle
@@ -178,14 +239,14 @@ def _paleta_grises_ciclico(self, norm: np.ndarray) -> np.ndarray:
 
 
 @register_palette("Iteraciones (Plasma ciclo 64)")
-def _paleta_iters_plasma(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_iters_plasma(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Paleta basada en el número de iteraciones:
     - Reconstruye iter ∈ [0..max_iter] desde norm
     - Usa iter % 64 para indexar un LUT de Plasma de 64 colores
     """
     # 1) Reconstruir conteo de iteraciones
-    iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
     cycle = 64
     # 2) Generar LUT de Plasma con 64 entradas
     cmap   = cm.get_cmap('plasma', cycle)
@@ -195,14 +256,14 @@ def _paleta_iters_plasma(self, norm: np.ndarray) -> np.ndarray:
 
        
 @register_palette("Iteraciones (Viridis ciclo 64)")
-def _paleta_iters_viridis(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_iters_viridis(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Paleta basada en el número de iteraciones:
     - Reconstruye iter ∈ [0..max_iter] desde norm
     - Usa iter % 64 para indexar un LUT de Viridis de 64 colores
     """
     # 1) Reconstruir conteo de iteraciones
-    iters = np.uint32((norm * self.max_iter).clip(0, self.max_iter))
+    iters = np.uint32((norm * max_iter).clip(0, max_iter))
     cycle = 64
     # 2) Generar LUT de Viridis con 64 entradas
     cmap   = cm.get_cmap('viridis', cycle)
@@ -211,7 +272,7 @@ def _paleta_iters_viridis(self, norm: np.ndarray) -> np.ndarray:
     return lut[iters % cycle]  # shape=(H, W, 3), dtype=uint8
 
 @register_palette("Bandas RGB")
-def _paleta_bandas_rgb(self, norm: np.ndarray) -> np.ndarray:
+def _paleta_bandas_rgb(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
     Bandas semilineales: divide norm en 3 franjas, con degradado lineal dentro de cada franja:
     - franja0: rojo crece de 0→1

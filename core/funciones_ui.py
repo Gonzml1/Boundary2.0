@@ -1,22 +1,24 @@
 from gui.MandelbrotGUI import Ui_Boundary
 from PyQt5 import QtWidgets
 from core.modulo_opengl import MandelbrotWidget
-from core.modulo_de_calculo_fractales import calculos_mandelbrot
 
-#calcular_fractal(xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, real, imag)
-def mostrar_fractal_opengl(self=Ui_Boundary()):
+def mostrar_fractal_opengl(ui):
     try:
-        # Obtener valores desde los campos de entrada
-        cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal,zoom_in, zoom_out = obtener_datos(self)
+        # Obtener los 16 valores exactos desde la UI
+        cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag = obtener_datos(ui)
         
-        mandelbrot_widget = MandelbrotWidget(cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out,self)
+        mandelbrot_widget = MandelbrotWidget(
+            cmap, xmin, xmax, ymin, ymax, width, height, max_iter, 
+            formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, 
+            clase_equiv, real, imag
+        )
 
-        if self.grafico_openGLWidget.layout() is None:
-            layout = QtWidgets.QVBoxLayout(self.grafico_openGLWidget)
+        if ui.grafico_openGLWidget.layout() is None:
+            layout = QtWidgets.QVBoxLayout(ui.grafico_openGLWidget)
             layout.setContentsMargins(0, 0, 0, 0)
-            self.grafico_openGLWidget.setLayout(layout)
+            ui.grafico_openGLWidget.setLayout(layout)
         else:
-            layout = self.grafico_openGLWidget.layout()
+            layout = ui.grafico_openGLWidget.layout()
 
         while layout.count():
             child = layout.takeAt(0)
@@ -25,27 +27,27 @@ def mostrar_fractal_opengl(self=Ui_Boundary()):
                 
         layout.addWidget(mandelbrot_widget)
         return mandelbrot_widget
-    except ValueError:
-        print("Error: Asegurate de que los campos tengan valores numéricos válidos.")
+    except Exception as e:
+        # Imprimimos el error real en consola para no fallar en silencio
+        print(f"Error crítico al cargar OpenGL: {e}")
+        raise e
 
-def obtener_datos(self=Ui_Boundary()):
-    cmap          =   str(self.cmap_comboBox.currentText())
-    xmin          =   float(self.xmin_entrada.text())
-    xmax          =   float(self.xmax_entrada.text())
-    ymin          =   float(self.ymin_entrada.text())
-    ymax          =   float(self.ymax_entrada.text())
-    width         =   int(self.width_entrada.text())
-    height        =   int(self.high_entrada.text())
-    max_iter      =   int(self.max_iter_entrada.text())
-    tipo_calculo  =   str(self.tipo_calculo_comboBox.currentText())
-    tipo_fractal  =   str(self.tipo_fractal_comboBox.currentText())
-    formula       =   str(self.formula_entrada.text())
-    zoom_out      =   float(self.zoom_out_factor_entrada.text())
-    zoom_in       =   float(self.zoom_in_factor_entrada.text())
-
+def obtener_datos(ui):
+    cmap          =   str(ui.cmap_comboBox.currentText())
+    xmin          =   float(ui.xmin_entrada.text())
+    xmax          =   float(ui.xmax_entrada.text())
+    ymin          =   float(ui.ymin_entrada.text())
+    ymax          =   float(ui.ymax_entrada.text())
+    width         =   int(ui.width_entrada.text())
+    height        =   int(ui.high_entrada.text())
+    max_iter      =   int(ui.max_iter_entrada.text())
+    tipo_calculo  =   str(ui.tipo_calculo_comboBox.currentText())
+    tipo_fractal  =   str(ui.tipo_fractal_comboBox.currentText())
+    formula       =   str(ui.formula_entrada.text())
+    zoom_out      =   float(ui.zoom_out_factor_entrada.text())
+    zoom_in       =   float(ui.zoom_in_factor_entrada.text())
+    clase_equiv   =   int(ui.clase_equiv_entrada.text())
+    real          =   float(ui.real_julia_entrada.text())
+    imag          =   float(ui.im_julia_entrada.text())
     
-    return cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out   
-
-
-
-
+    return cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag

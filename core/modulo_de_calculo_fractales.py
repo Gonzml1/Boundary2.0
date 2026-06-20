@@ -43,7 +43,7 @@ class calculos_mandelbrot:
         self.tipo_fractal = tipo_fractal
         self.x_np = np.linspace(self.xmin, self.xmax, self.width, dtype=np.float64)
         self.y_np = np.linspace(self.ymin, self.ymax, self.height, dtype=np.float64)
-
+        
 
     @staticmethod
     def medir_tiempo(nombre) -> callable:
