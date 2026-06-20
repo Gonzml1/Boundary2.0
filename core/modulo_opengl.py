@@ -164,7 +164,7 @@ class MandelbrotWidget(QOpenGLWidget):
             alto_corregido = ancho_actual / aspect_ratio
             
             self.ymin = centro_y - alto_corregido / 2
-            self.ymax = centro_y + alto_corregido / 2g
+            self.ymax = centro_y + alto_corregido / 2
             
             self.width = w
             self.height = h
