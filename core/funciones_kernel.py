@@ -17,47 +17,41 @@ mandelbrot_kernel = cp.ElementwiseKernel(
     name='mandelbrot_kernel'
 )
 
-#mandelbrot_kernel = cp.ElementwiseKernel(
-#    in_params='complex128 c, int32 max_iter',
-#    out_params='int32 result',
-#    operation="""
-#        double cx = real(c);
-#        double cy = imag(c);
-#        
-#        // 1. OPTIMIZACIÓN MATEMÁTICA: Cardioid y Period-2 Bulb Check
-#        // Si el punto está en las zonas más grandes del fractal, 
-#        // sabemos que NUNCA va a escapar. Nos ahorramos el bucle completo.
-#        double q = (cx - 0.25) * (cx - 0.25) + cy * cy;
-#        if (q * (q + (cx - 0.25)) <= 0.25 * cy * cy || (cx + 1.0) * (cx + 1.0) + cy * cy <= 0.0625) {
-#            result = max_iter;
-#            return;
-#        }
-#
-#        double x = 0.0;
-#        double y = 0.0;
-#        double x2 = 0.0;
-#        double y2 = 0.0;
-#
-#        // 2. DESCOMPOSICIÓN ALGEBRAICA
-#        // En lugar de usar la estructura 'complex', separamos reales e imaginarios.
-#        // Reutilizamos x2 e y2 para no calcularlos dos veces (una para la suma y otra para el límite).
-#        for (int i = 0; i < max_iter; ++i) {
-#            y = 2.0 * x * y + cy;
-#            x = x2 - y2 + cx;
-#            
-#            x2 = x * x;
-#            y2 = y * y;
-#            
-#            // Verificación de escape
-#            if (x2 + y2 > 4.0) {
-#                result = i;
-#                return;
-#            }
-#        }
-#        result = max_iter;  
-#    """,
-#    name='mandelbrot_kernel_opt'
-#)
+mandelbrot_kernel_optimizado = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='int32 result',
+    operation="""
+        double cx = real(c);
+        double cy = imag(c);
+        
+        double q = (cx - 0.25) * (cx - 0.25) + cy * cy;
+        if (q * (q + (cx - 0.25)) <= 0.25 * cy * cy || (cx + 1.0) * (cx + 1.0) + cy * cy <= 0.0625) {
+            result = max_iter;
+            return;
+        }
+
+        double x = 0.0;
+        double y = 0.0;
+        double x2 = 0.0;
+        double y2 = 0.0;
+
+        for (int i = 0; i < max_iter; ++i) {
+            y = 2.0 * x * y + cy;
+            x = x2 - y2 + cx;
+            
+            x2 = x * x;
+            y2 = y * y;
+            
+            // Verificación de escape
+            if (x2 + y2 > 4.0) {
+                result = i;
+                return;
+            }
+        }
+        result = max_iter;  
+   """,
+    name='mandelbrot_kernel_opt'
+)
 
 julia_kernel = cp.ElementwiseKernel(
     in_params='complex128 z, complex128 c, int32 max_iter',

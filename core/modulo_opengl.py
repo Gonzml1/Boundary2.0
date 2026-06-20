@@ -1,4 +1,6 @@
 import numpy as np
+import os
+import sys
 from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtCore import Qt
 from OpenGL.GL import *
@@ -7,7 +9,7 @@ from gui.MandelbrotGUI import Ui_Boundary
 from matplotlib import cm
 from typing import Callable
 from PyQt5 import QtCore
-from PyQt5.QtWidgets import QFileDialog
+from PyQt5.QtWidgets import QFileDialog, QInputDialog , QApplication
 import matplotlib.pyplot as plt
 from PyQt5.QtCore import QTimer
 PALETTE_REGISTRY: list[tuple[str, Callable[[np.ndarray], np.ndarray]]] = []
@@ -48,7 +50,7 @@ class MandelbrotWidget(QOpenGLWidget):
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.ui.boton_hacer_fractal.clicked.connect(lambda : self.update())
+        self.ui.boton_hacer_fractal.clicked.connect(lambda : self.video())
         self.ui.slider_iteraciones.valueChanged.connect(self.update)
         self.actualizar_parametros()
         self.palettes = []
@@ -66,6 +68,7 @@ class MandelbrotWidget(QOpenGLWidget):
         self.render_timer.timeout.connect(self.ejecutar_alta_resolucion)
         self.is_preview_mode = False
         
+
         self.resolucion_adaptativa_activa = True
 
     def interaccion_rapida(self):
@@ -186,45 +189,150 @@ class MandelbrotWidget(QOpenGLWidget):
         
     # Opcional: atajar una tecla para cambiar
 
+    def video(self):
+            # 1) Pedir carpeta
+            carpeta = QFileDialog.getExistingDirectory(None, "Seleccionar carpeta para los frames")
+            if not carpeta:
+                return
+
+            # 2) Pedir cantidad de cuadros
+            frames, ok_frames = QInputDialog.getInt(None, "Secuencia de Video", "Cantidad de frames a renderizar:", 60, 1, 10000)
+            if not ok_frames:
+                return
+
+            # 3) Pedir el factor de zoom
+            factor_zoom, ok_zoom = QInputDialog.getDouble(None, "Secuencia de Video", "Factor de zoom por frame (ej. >1 aleja, <1 acerca):", 1.03, 0.001, 10.0, 4)
+            if not ok_zoom:
+                return
+
+            # 4) Pedir la resolución
+            resoluciones = ["Actual (como se ve en pantalla)", "Full HD (1920x1080)", "4K (3840x2160)"]
+            res_elegida, ok_res = QInputDialog.getItem(None, "Secuencia de Video", "Seleccionar resolución:", resoluciones, 0, False)
+            if not ok_res:
+                return
+
+            # Asignar dimensiones según la elección
+            if "Full HD" in res_elegida:
+                render_w, render_h = 1920, 1080
+            elif "4K" in res_elegida:
+                render_w, render_h = 3840, 2160
+            else:
+                render_w, render_h = self.width, self.height
+
+            print(f"Iniciando renderizado de {frames} frames en: {carpeta} (Zoom: {factor_zoom}, Resolución: {render_w}x{render_h})")
+
+            for i in range(frames):
+                # Usamos render_w y render_h para calcular con la resolución elegida
+                self.mandelbrot.actualizar_fractal(
+                    self.xmin, self.xmax,
+                    self.ymin, self.ymax,
+                    render_w, render_h,
+                    self.max_iter,
+                    self.formula, self.tipo_calculo,
+                    self.tipo_fractal,
+                    self.real, self.imag
+                )
+                
+                data = self.mandelbrot.calcular_fractal()
+                norm = data.astype(float) / self.max_iter
+                name, func = self.palettes[self.palette_index]
+                rgb = func(norm)
+
+                nombre_archivo = f"frame_{i:04d}.png"
+                ruta = os.path.join(carpeta, nombre_archivo)
+                
+                # Forzamos a uint8 para que Matplotlib no tire error de rango
+                plt.imsave(ruta, rgb.astype(np.uint8))
+                
+                # --- Barra de progreso robusta ---
+                longitud_barra = 40
+                progreso = (i + 1) / frames
+                bloques_llenos = int(longitud_barra * progreso)
+                barra = '█' * bloques_llenos + '-' * (longitud_barra - bloques_llenos)
+                porcentaje = progreso * 100
+                
+                # Usamos sys.stdout para sobreescribir la misma línea
+                sys.stdout.write(f"\rGuardando video: [{barra}] {i+1}/{frames} ({porcentaje:.1f}%)")
+                sys.stdout.flush()
+
+                # Evita que la interfaz de PyQt5 se congele
+                QApplication.processEvents()
+
+                # Aplicar zoom personalizado matemáticamente
+                c_x = (self.xmin + self.xmax) / 2
+                c_y = (self.ymin + self.ymax) / 2
+                
+                ancho_nuevo = (self.xmax - self.xmin) * factor_zoom
+                alto_nuevo = (self.ymax - self.ymin) * factor_zoom
+                
+                dx = ancho_nuevo / 2
+                dy = alto_nuevo / 2
+                
+                self.xmin, self.xmax = c_x - dx, c_x + dx
+                self.ymin, self.ymax = c_y - dy, c_y + dy
+
+            # Al terminar, restauramos la UI a los parámetros del último frame (usando la resolución de la ventana)
+            self.actualizar_parametros()
+            self.mostrar_parametros(self.xmin, self.xmax, self.ymin, self.ymax,
+                                    self.width, self.height, self.max_iter, self.clase_equiv)
+            self.interaccion_rapida()
+            
+            sys.stdout.write("\n") # Salto de línea final para que no se pise el próximo print
+            print("¡Secuencia completada!")
+            
 
     # ——— paintGL revisitado, usando el índice de paleta ———
     def guardar_imagen(self) -> None:
-        ruta, _ = QFileDialog.getSaveFileName(
-            None,
-            "Guardar imagen",
-            f"fractal_{self.xmin:.16f}_{self.xmax:.16f}_{self.ymin:.16f}_{self.ymax:.16f}_{self.tipo_fractal}_{self.max_iter}.png",
-            "PNG (*.png);;JPEG (*.jpg *.jpeg);;Todos los archivos (*)"
-        )
-        if not ruta:
-            return
+            from PyQt5.QtWidgets import QInputDialog, QFileDialog
 
-        # 1) Generar los datos del fractal
-        self.mandelbrot.actualizar_fractal(
-            self.xmin, self.xmax,
-            self.ymin, self.ymax,
-            4*self.width, 4*self.height,
-            self.max_iter,
-            self.formula, self.tipo_calculo,
-            self.tipo_fractal,
-            self.real, self.imag
-        )
-        data = self.mandelbrot.calcular_fractal()  # np.ndarray de enteros [0..max_iter]
+            # 1) Elegir resolución
+            resoluciones = ["Actual (como se ve en pantalla)", "Full HD (1920x1080)", "4K (3840x2160)"]
+            res_elegida, ok_res = QInputDialog.getItem(None, "Guardar Imagen", "Seleccionar resolución:", resoluciones, 0, False)
+            if not ok_res:
+                return
 
-        # 2) Normalizar a [0,1]
-        norm = data.astype(float) / self.max_iter
+            # Asignar dimensiones
+            if "Full HD" in res_elegida:
+                render_w, render_h = 1920, 1080
+            elif "4K" in res_elegida:
+                render_w, render_h = 3840, 2160
+            else:
+                render_w, render_h = self.width, self.height
 
-        # 3) Elegir la paleta actual
-        name, func = self.palettes[self.palette_index]
+            # 2) Elegir ruta
+            ruta, _ = QFileDialog.getSaveFileName(
+                None,
+                "Guardar imagen",
+                f"fractal_{self.xmin:.16f}_{self.xmax:.16f}_{self.ymin:.16f}_{self.ymax:.16f}_{self.tipo_fractal}_{self.max_iter}.png",
+                "PNG (*.png);;JPEG (*.jpg *.jpeg);;Todos los archivos (*)"
+            )
+            if not ruta:
+                return
 
-        # 4) Aplicar la paleta → rgb uint8 (H,W,3)
-        rgb = func(norm)
+            # 3) Generar los datos del fractal con la resolución elegida
+            self.mandelbrot.actualizar_fractal(
+                self.xmin, self.xmax,
+                self.ymin, self.ymax,
+                render_w, render_h,
+                self.max_iter,
+                self.formula, self.tipo_calculo,
+                self.tipo_fractal,
+                self.real, self.imag
+            )
+            data = self.mandelbrot.calcular_fractal()  
 
-        # 5) Invertir verticalmente si lo hacés en paintGL
+            # 4) Normalizar y colorear
+            norm = data.astype(float) / self.max_iter
+            name, func = self.palettes[self.palette_index]
+            rgb = func(norm)
 
-        # 6) Guardar la imagen directamente como RGB (sin pasar cmap)
-        # plt.imsave admite uint8 RGB si no le pasás cmap
-        plt.imsave(ruta, rgb)
-        print(f"Imagen guardada en: {ruta}")
+            # 5) Guardar la imagen (forzando uint8)
+            plt.imsave(ruta, rgb.astype(np.uint8))
+            print(f"Imagen guardada en {render_w}x{render_h}: {ruta}")
+
+            # 6) Restaurar parámetros de la vista actual para seguir navegando
+            self.actualizar_parametros()
+            self.interaccion_rapida()
 
     def linkeo_botones(self):
         self.ui.boton_dividir.clicked.connect(lambda : self.dividir())

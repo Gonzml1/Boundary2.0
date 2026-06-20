@@ -104,7 +104,7 @@ class calculos_mandelbrot:
     # Mandelbrot #
     ##############
     
-    @register_fractal("Mandelbrot", "GPU_Cupy_kernel")
+    #@register_fractal("Mandelbrot", "GPU_Cupy_kernel")
     @medir_tiempo("Mandelbrot GPU")
     def hacer_mandelbrot_gpu(self) -> np.ndarray:
         C = self._generar_malla_compleja_gpu()
@@ -114,6 +114,24 @@ class calculos_mandelbrot:
         
         try:
             mandelbrot_kernel(C, self.max_iter, resultado)
+        except Exception as e:
+            raise RuntimeError(f"Fallo en Kernel GPU: {e}")
+            
+        resultado = resultado.reshape((self.height, self.width))
+        resultado_cpu = resultado.get()
+
+        return resultado_cpu
+    
+    @register_fractal("Mandelbrot", "GPU_Cupy_kernel_optimizado")
+    @medir_tiempo("Mandelbrot GPU optimizado")
+    def hacer_mandelbrot_gpu(self) -> np.ndarray:
+        C = self._generar_malla_compleja_gpu()
+        C = C.ravel() 
+        
+        resultado = cp.empty(C.shape, dtype=cp.int32)
+        
+        try:
+            mandelbrot_kernel_optimizado(C, self.max_iter, resultado)
         except Exception as e:
             raise RuntimeError(f"Fallo en Kernel GPU: {e}")
             
