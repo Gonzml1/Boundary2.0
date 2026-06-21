@@ -6,14 +6,13 @@ from core.modulo_de_calculo_fractales import calculos_mandelbrot
 from core.paletas import PALETTE_REGISTRY
 
 class MandelbrotWidget(QOpenGLWidget):
-    # --- SEÑALES PARA COMUNICARSE CON LA UI SIN CONOCERLA ---
+    # --- SEÑALES MVC ---
     coordenadas_raton_cambiadas = pyqtSignal(float, float)
     limites_zoom_cambiados = pyqtSignal(float, float, float, float)
-    parametros_matematicos_cambiados = pyqtSignal(int, int) # max_iter, clase_equiv
+    parametros_matematicos_cambiados = pyqtSignal(int, int)
 
     def __init__(self, cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
         super().__init__()
-        # Parámetros del estado
         self.cmap = cmap    
         self.xmin = xmin
         self.xmax = xmax
@@ -39,19 +38,16 @@ class MandelbrotWidget(QOpenGLWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         
-        self.palettes = PALETTE_REGISTRY # Paletas puras desde archivo externo
+        self.palettes = PALETTE_REGISTRY 
         self.palette_index = 0
 
-        # Sistema adaptativo
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
         self.render_timer.timeout.connect(self.ejecutar_alta_resolucion)
         self.is_preview_mode = False
         self.resolucion_adaptativa_activa = True
-        self.fluido_activo = False
 
     def actualizar_estado_desde_ui(self, cmap, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
-        """La UI llama a este método cuando el usuario cambia un valor en los TextBox/ComboBox."""
         self.cmap = cmap
         self.width = width
         self.height = height
@@ -88,11 +84,10 @@ class MandelbrotWidget(QOpenGLWidget):
         self.update()
 
     def obtener_frame_rgb(self, render_w, render_h):
-        """Método puro que genera una matriz de colores. No sabe nada de guardar ni de archivos."""
         self.mandelbrot.actualizar_fractal(self.xmin, self.xmax, self.ymin, self.ymax, render_w, render_h, self.max_iter, self.formula, self.tipo_calculo, self.tipo_fractal, self.real, self.imag)
         data = self.mandelbrot.calcular_fractal()
         norm = data.astype(float) / self.max_iter
-        name, func = self.palettes[self.palette_index]
+        _, func = self.palettes[self.palette_index]
         return func(norm, self.max_iter, self.clase_equiv, getattr(self, 't_actual', 0.0), getattr(self, 'thickness', 0.0))
 
     def initializeGL(self):
@@ -101,26 +96,20 @@ class MandelbrotWidget(QOpenGLWidget):
 
     def pixel_a_complejo(self, x, y):
         real = self.xmin + (x / self.width) * (self.xmax - self.xmin)
-        imag = self.ymin + (y / self.height) * (self.ymax - self.ymin)
+        imag = self.ymin + (1.0 - (y / self.height)) * (self.ymax - self.ymin) # Invertimos Y
         return real, imag
 
-    def mouseMoveEvent(self, event):
-        x, y = event.x(), event.y()
-        real, imag = self.pixel_a_complejo(x, y)
-        self.coordenadas_raton_cambiadas.emit(real, imag) # Avisa a la UI de las coordenadas
+    def corregir_aspect_ratio(self):
+        if self.height == 0: return
+        aspect_ratio = self.width / self.height
+        centro_y = (self.ymin + self.ymax) / 2
+        ancho_actual = self.xmax - self.xmin
+        alto_corregido = ancho_actual / aspect_ratio
+        
+        self.ymin = centro_y - alto_corregido / 2
+        self.ymax = centro_y + alto_corregido / 2
+        self.limites_zoom_cambiados.emit(self.xmin, self.xmax, self.ymin, self.ymax)
 
-        if self.dragging:
-            c0_real, c0_imag = self.pixel_a_complejo(self.last_pos.x(), self.last_pos.y())
-            dx = c0_real - real
-            dy = c0_imag - imag
-            self.xmin += dx
-            self.xmax += dx
-            self.ymin += dy
-            self.ymax += dy
-            self.last_pos = event.pos()
-            self.limites_zoom_cambiados.emit(self.xmin, self.xmax, self.ymin, self.ymax)
-            self.interaccion_rapida()
-            
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
         glLoadIdentity()
@@ -144,35 +133,19 @@ class MandelbrotWidget(QOpenGLWidget):
             return
 
         norm = data / self.max_iter 
-        name, func = self.palettes[self.palette_index]
-        rgb = func(norm, self.max_iter, self.clase_equiv, getattr(self, 't_actual', 0.0), getattr(self, 'thickness', 0.0))[::-1, :, :]
+        _, func = self.palettes[self.palette_index]
+        rgb = func(norm, self.max_iter, self.clase_equiv, getattr(self, 't_actual', 0.0), getattr(self, 'thickness', 0.0))
 
         glPixelZoom(factor_escala, factor_escala)
         glDrawPixels(render_w, render_h, GL_RGB, GL_UNSIGNED_BYTE, rgb)
         glPixelZoom(1.0, 1.0)
 
     def resizeGL(self, w, h):
-            if h == 0: h = 1 # Evitar división por cero al minimizar
-            
-            # 1. Calcular el centro actual y la relación de aspecto física
-            aspect_ratio = w / h
-            centro_x = (self.xmin + self.xmax) / 2
-            centro_y = (self.ymin + self.ymax) / 2
-            
-            # 2. Mantener el ancho matemático, pero corregir el alto
-            ancho_actual = self.xmax - self.xmin
-            alto_corregido = ancho_actual / aspect_ratio
-            
-            self.ymin = centro_y - alto_corregido / 2
-            self.ymax = centro_y + alto_corregido / 2
-            
-            self.width = w
-            self.height = h
-            glViewport(0, 0, w, h)
-            
-            # 3. Sincronizar las cajas de texto de la UI con la nueva realidad
-            self.limites_zoom_cambiados.emit(self.xmin, self.xmax, self.ymin, self.ymax)
-            self.update()
+        self.width = w
+        self.height = h
+        glViewport(0, 0, w, h)
+        self.corregir_aspect_ratio()
+        self.update()
 
     def wheelEvent(self, event):
         zoom = 0.9 if event.angleDelta().y() > 0 else 1.1
@@ -180,9 +153,9 @@ class MandelbrotWidget(QOpenGLWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._centrar_y_zoom(event.x(), event.y(), self.zoom_in)
+            self._centrar_y_zoom(event.x(), self.height - event.y(), self.zoom_in)
         elif event.button() == Qt.RightButton:
-            self._centrar_y_zoom(event.x(), event.y(), self.zoom_out)
+            self._centrar_y_zoom(event.x(), self.height - event.y(), self.zoom_out)
         elif event.button() == Qt.MiddleButton:
             self.dragging = True
             self.last_pos = event.pos()
@@ -190,6 +163,23 @@ class MandelbrotWidget(QOpenGLWidget):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton:
             self.dragging = False
+
+    def mouseMoveEvent(self, event):
+        x, y = event.x(), event.y()
+        real, imag = self.pixel_a_complejo(x, y)
+        self.coordenadas_raton_cambiadas.emit(real, imag) 
+
+        if self.dragging:
+            c0_real, c0_imag = self.pixel_a_complejo(self.last_pos.x(), self.last_pos.y())
+            dx = c0_real - real
+            dy = c0_imag - imag
+            self.xmin += dx
+            self.xmax += dx
+            self.ymin += dy
+            self.ymax += dy
+            self.last_pos = event.pos()
+            self.limites_zoom_cambiados.emit(self.xmin, self.xmax, self.ymin, self.ymax)
+            self.interaccion_rapida()
 
     def _aplicar_zoom(self, factor):
         c_x, c_y = (self.xmin + self.xmax) / 2, (self.ymin + self.ymax) / 2
@@ -201,7 +191,9 @@ class MandelbrotWidget(QOpenGLWidget):
         self.interaccion_rapida()
 
     def _centrar_y_zoom(self, px, py, factor):
-        c_x, c_y = self.pixel_a_complejo(px, py)
+        # py ya viene invertido desde mousePressEvent
+        c_x = self.xmin + (px / self.width) * (self.xmax - self.xmin)
+        c_y = self.ymin + (py / self.height) * (self.ymax - self.ymin)
         self.xmin = c_x - (c_x - self.xmin) * factor
         self.xmax = c_x + (self.xmax - c_x) * factor
         self.ymin = c_y - (c_y - self.ymin) * factor
@@ -215,8 +207,8 @@ class MandelbrotWidget(QOpenGLWidget):
         
         if event.key() in (Qt.Key_Left, Qt.Key_A): self.xmin, self.xmax = self.xmin - dx, self.xmax - dx
         elif event.key() in (Qt.Key_Right, Qt.Key_D): self.xmin, self.xmax = self.xmin + dx, self.xmax + dx
-        elif event.key() in (Qt.Key_Up, Qt.Key_W): self.ymin, self.ymax = self.ymin - dy, self.ymax - dy
-        elif event.key() in (Qt.Key_Down, Qt.Key_S): self.ymin, self.ymax = self.ymin + dy, self.ymax + dy
+        elif event.key() in (Qt.Key_Up, Qt.Key_W): self.ymin, self.ymax = self.ymin + dy, self.ymax + dy
+        elif event.key() in (Qt.Key_Down, Qt.Key_S): self.ymin, self.ymax = self.ymin - dy, self.ymax - dy
         elif event.key() == Qt.Key_Plus: self._aplicar_zoom(self.zoom_in)
         elif event.key() == Qt.Key_Minus: self._aplicar_zoom(self.zoom_out)
         elif event.key() == Qt.Key_P: self.next_palette()
@@ -224,7 +216,7 @@ class MandelbrotWidget(QOpenGLWidget):
         elif event.key() == Qt.Key_R: 
             self.xmin, self.xmax, self.ymin, self.ymax = -2.0, 1.2, -0.9, 0.9
             self.max_iter, self.clase_equiv = 256, 128
-            self.limites_zoom_cambiados.emit(self.xmin, self.xmax, self.ymin, self.ymax)
+            self.corregir_aspect_ratio()
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
         elif event.key() == Qt.Key_G: 
             self.max_iter = int(self.max_iter * 2)

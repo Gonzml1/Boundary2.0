@@ -111,4 +111,3 @@ circulo_kernel = cp.ElementwiseKernel(
     name='circulo_kernel'
 )
 
-

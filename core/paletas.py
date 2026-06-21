@@ -11,53 +11,6 @@ def register_palette(palette_name: str):
     return deco
 
 
-@register_palette("Iteracion varibales (YlGnBu variable)")
-def _paleta_ylgnbu(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
-    """
-    Colormap 'YlGnBu' de Matplotlib (secuencial amarillo→verde→azul).
-    """
-    iters = np.uint32((norm * max_iter).clip(0, max_iter))
-    cycle = clase_equiv
-    mod = iters % cycle
-    cmap = cm.get_cmap('YlGnBu', cycle)
-    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-    return lut[mod]
-
-@register_palette("Iteraciones variables (Viridis variable)")
-def _pallete_iters_variable_viridis(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
-    """
-    - Reconstruye iter ∈ [0..max_iter] desde norm
-    - Usa iter % 64 para indexar un LUT de viridis de clase_equiv colores
-    """
-    iters = np.uint32((norm * max_iter).clip(0, max_iter))
-    cycle = clase_equiv
-    mod = iters % cycle
-    cmap = cm.get_cmap('viridis', cycle)
-    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-    return lut[mod]
-@register_palette("Iteraciones variables (Plasma variable)")
-def _pallete_iters_variable_plasma(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
-    """
-    - Reconstruye iter ∈ [0..max_iter] desde norm
-    - Usa iter % 64 para indexar un LUT de plasma de clase_equiv colores
-    """
-    iters = np.uint32((norm * max_iter).clip(0, max_iter))
-    cycle = clase_equiv
-    cmap= cm.get_cmap('plasma', cycle)
-    lut = (cmap(np.arange(cycle))[:, :3] * 255).astype(np.uint8)
-    return lut[iters % cycle]
-@register_palette("Iteraciones variables (Grises)")
-def _pallete_iters_variable_grises(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
-    """
-    - Reconstruye iter ∈ [0..max_iter] desde norm
-    - Usa iter % 64 para indexar un LUT de grises cíclico de clase_equiv colores
-    """
-    iters = np.uint32((norm * max_iter).clip(0, max_iter))
-    cycle = clase_equiv
-    mod = iters % cycle
-    gray = np.uint8(((mod.astype(float) / (cycle - 1)) * 255).clip(0, 255))
-    return np.dstack([gray, gray, gray])
-
 @register_palette("Iteraciones variables (Twilight Shifted)")
 def _paleta_iters_variable_twilight(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """
