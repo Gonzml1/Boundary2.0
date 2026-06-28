@@ -1,5 +1,5 @@
 # pyuic6 -x "V:\ABoundary\gui\MandelbrotGUI.ui" -o "V:\ABoundary\gui\MandelbrotGUI.py"
-
+# pyuic5 -x "F:\ABoundary20\gui\MandelbrotGUI.ui" -o "F:\ABoundary20\gui\MandelbrotGUI.py"
 import sys
 from PyQt5 import QtWidgets
 import gui.tema_oscuro as ts

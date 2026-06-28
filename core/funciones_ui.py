@@ -1,15 +1,17 @@
 from gui.MandelbrotGUI import Ui_Boundary
 from PyQt5 import QtWidgets
 from core.modulo_opengl import MandelbrotWidget
+from decimal import Decimal, getcontext
+getcontext().prec = 100
 
 def mostrar_fractal_opengl(ui):
     try:
         # Obtener los 16 valores exactos desde la UI
-        cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag = obtener_datos(ui)
+        cmap, xmin, xmax, ymin, ymax, width, height, max_iter, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag = obtener_datos(ui)
         
         mandelbrot_widget = MandelbrotWidget(
             cmap, xmin, xmax, ymin, ymax, width, height, max_iter, 
-            formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, 
+            tipo_calculo, tipo_fractal, zoom_in, zoom_out, 
             clase_equiv, real, imag
         )
 
@@ -33,21 +35,21 @@ def mostrar_fractal_opengl(ui):
         raise e
 
 def obtener_datos(ui):
+    xmin          =   Decimal(ui.xmin_entrada.text())
+    xmax          =   Decimal(ui.xmax_entrada.text())
+    ymin          =   Decimal(ui.ymin_entrada.text())
+    ymax          =   Decimal(ui.ymax_entrada.text())
+    zoom_out      =   Decimal(ui.zoom_out_factor_entrada.text())
+    zoom_in       =   Decimal(ui.zoom_in_factor_entrada.text())
+    real          =   Decimal(0.1)
+    imag          =   Decimal(0.1)
     cmap          =   str(ui.cmap_comboBox.currentText())
-    xmin          =   float(ui.xmin_entrada.text())
-    xmax          =   float(ui.xmax_entrada.text())
-    ymin          =   float(ui.ymin_entrada.text())
-    ymax          =   float(ui.ymax_entrada.text())
     width         =   int(ui.width_entrada.text())
     height        =   int(ui.high_entrada.text())
     max_iter      =   int(ui.max_iter_entrada.text())
     tipo_calculo  =   str(ui.tipo_calculo_comboBox.currentText())
     tipo_fractal  =   str(ui.tipo_fractal_comboBox.currentText())
-    formula       =   str(ui.formula_entrada.text())
-    zoom_out      =   float(ui.zoom_out_factor_entrada.text())
-    zoom_in       =   float(ui.zoom_in_factor_entrada.text())
     clase_equiv   =   int(ui.clase_equiv_entrada.text())
-    real          =   float(ui.real_julia_entrada.text())
-    imag          =   float(ui.im_julia_entrada.text())
+
     
-    return cmap, xmin, xmax, ymin, ymax, width, height, max_iter, formula, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag
+    return cmap, xmin, xmax, ymin, ymax, width, height, max_iter, tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag

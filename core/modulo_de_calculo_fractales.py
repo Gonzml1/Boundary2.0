@@ -6,6 +6,32 @@ from .funciones_kernel import *
 from functools import wraps
 #from  .coimport mandelbrot
 from .backend_cpp import *
+from decimal import Decimal
+from core.funciones_kernel import mandelbrot_perturbacion_kernel
+
+ruta_dll_pert = os.path.join(os.path.dirname(__file__), '..', 'codigos_cpp', 'perturbacion.dll')
+try:
+    lib_pert = ctypes.CDLL(ruta_dll_pert)
+    lib_pert.calcular_orbita_referencia.argtypes = [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS')
+    ]
+    lib_pert.calcular_orbita_referencia.restype = None
+except Exception as e:
+    print(f"Advertencia: No se pudo cargar perturbacion.dll - {e}")
+
+ruta_dll_gmp = os.path.join(os.path.dirname(__file__), '..', 'codigos_cpp', 'gmp_puro.dll')
+try:
+    lib_gmp_puro = ctypes.CDLL(ruta_dll_gmp)
+    lib_gmp_puro.calcular_mandelbrot_gmp_puro.argtypes = [
+        ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
+    ]
+    lib_gmp_puro.calcular_mandelbrot_gmp_puro.restype = None
+except Exception as e:
+    print(f"Advertencia: No se pudo cargar gmp_puro.dll - {e}")
 
 # cp.exp((z[matriz]**2 - 1.00001*z[matriz]) / C[matriz]**4) 
 # z[matriz] = z[matriz]**2 + C[matriz]    
@@ -29,7 +55,7 @@ def register_fractal(fractal: str, calc: str) -> callable:
 #para añadir en un futuro
 class calculos_mandelbrot:
     def __init__(self, xmin: float, xmax: float , ymin: float, ymax: float, 
-                 width: int, height: int, max_iter: int, formula: str, 
+                 width: int, height: int, max_iter: int, 
                  tipo_calculo: str, tipo_fractal: str) -> None:
         self.xmin = xmin
         self.xmax = xmax
@@ -38,7 +64,6 @@ class calculos_mandelbrot:
         self.width = width
         self.height = height
         self.max_iter = max_iter
-        self.formula = formula
         self.tipo_calculo = tipo_calculo
         self.tipo_fractal = tipo_fractal
         self.x_np = np.linspace(self.xmin, self.xmax, self.width, dtype=np.float64)
@@ -65,8 +90,8 @@ class calculos_mandelbrot:
             xmin: float,  xmax: float,
             ymin: float,  ymax: float,
             width: int,   height: int,
-            max_iter: int, formula: str,
-            tipo_calculo: str, tipo_fractal: str,
+            max_iter: int,tipo_calculo: str, 
+            tipo_fractal: str,
             real: float, imag: float) -> None:
         """
         Actualiza los parámetros del fractal.
@@ -79,7 +104,6 @@ class calculos_mandelbrot:
         self.width = width
         self.height = height
         self.max_iter = max_iter
-        self.formula = formula
         self.tipo_calculo = tipo_calculo
         self.tipo_fractal = tipo_fractal
         self.real = real
@@ -100,6 +124,8 @@ class calculos_mandelbrot:
         X, Y = cp.meshgrid(x, y)
         return (X + 1j * Y).ravel()
     
+
+
     ##############
     # Mandelbrot #
     ##############
@@ -153,7 +179,76 @@ class calculos_mandelbrot:
         img = flat.copy().reshape(self.height, self.width)
         free_mandelbrot(ptr)
         return img
+    
+    @register_fractal("Mandelbrot", "perturbacion")
+    @medir_tiempo("Mandelrbot pertubation")
+    def hacer_mandelbrot_perturbacion(self):
+        # 1. Calcular el centro matemático con precisión absoluta
+        c_re = (Decimal(self.xmin) + Decimal(self.xmax)) / Decimal('2')
+        c_im = (Decimal(self.ymin) + Decimal(self.ymax)) / Decimal('2')
 
+        # Convertir a strings de bytes para C++
+        c_re_str = str(c_re).encode('utf-8')
+        c_im_str = str(c_im).encode('utf-8')
+
+        # 2. Preparar memoria para recibir la órbita de referencia
+        Z_ref_re = np.zeros(self.max_iter, dtype=np.float64)
+        Z_ref_im = np.zeros(self.max_iter, dtype=np.float64)
+
+        # 3. Llamar a C++ (GMP) para calcular el centro
+        lib_pert.calcular_orbita_referencia(c_re_str, c_im_str, self.max_iter, Z_ref_re, Z_ref_im)
+
+        # Subir la órbita a la memoria de la placa de video
+        d_Z_ref_re = cp.asarray(Z_ref_re)
+        d_Z_ref_im = cp.asarray(Z_ref_im)
+
+        # 4. Calcular el Delta base (Esquina superior izquierda vs Centro)
+        delta_c_x_base = float(Decimal(self.xmin) - c_re)
+        delta_c_y_base = float(Decimal(self.ymin) - c_im)
+
+        # Calcular el salto por cada pixel (Step)
+        step_x = float((Decimal(self.xmax) - Decimal(self.xmin)) / Decimal(self.width))
+        step_y = float((Decimal(self.ymax) - Decimal(self.ymin)) / Decimal(self.height))
+
+        # 5. Preparar la salida de la GPU
+        output = cp.zeros((self.height, self.width), dtype=cp.int32)
+
+        threadsperblock = (16, 16)
+        blockspergrid_x = int(np.ceil(self.width / threadsperblock[0]))
+        blockspergrid_y = int(np.ceil(self.height / threadsperblock[1]))
+        blockspergrid = (blockspergrid_x, blockspergrid_y)
+
+        # 6. Lanzar el kernel
+        mandelbrot_perturbacion_kernel(
+            blockspergrid, threadsperblock,
+            (d_Z_ref_re, d_Z_ref_im,
+            np.float64(delta_c_x_base), np.float64(delta_c_y_base),
+            np.float64(step_x), np.float64(step_y),
+            output, np.int32(self.max_iter), np.int32(self.width), np.int32(self.height))
+        )
+
+        # 7. Devolver a la CPU para colorear
+        return output.get()
+    
+    @register_fractal("Mandelbrot", "gmp")
+    @medir_tiempo("Gmp")
+    def hacer_mandelbrot_gmp_puro(self):
+        # Enviar los límites completos como strings para no perder precisión
+        xmin_str = str(self.xmin).encode('utf-8')
+        xmax_str = str(self.xmax).encode('utf-8')
+        ymin_str = str(self.ymin).encode('utf-8')
+        ymax_str = str(self.ymax).encode('utf-8')
+
+        # Crear la matriz destino en la CPU
+        output = np.zeros((self.height, self.width), dtype=np.int32)
+
+        # Llamar a la DLL
+        lib_gmp_puro.calcular_mandelbrot_gmp_puro(
+            xmin_str, xmax_str, ymin_str, ymax_str,
+            self.width, self.height, self.max_iter, output
+        )
+
+        return output
     #########
     # Julia #
     #########

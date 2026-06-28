@@ -111,3 +111,53 @@ circulo_kernel = cp.ElementwiseKernel(
     name='circulo_kernel'
 )
 
+
+mandelbrot_perturbacion_kernel = cp.RawKernel(r'''
+extern "C" __global__
+void mandelbrot_perturbacion(const double* Z_ref_re, const double* Z_ref_im, 
+                             double delta_c_x_base, double delta_c_y_base, 
+                             double step_x, double step_y, 
+                             float* output, int max_iter, int width, int height) {
+                             
+    int x = blockIdx.x * blockDim.x + threadIdx.x;
+    int y = blockIdx.y * blockDim.y + threadIdx.y;
+    
+    if (x >= width || y >= height) return;
+    int idx = y * width + x;
+    
+    double dc_re = delta_c_x_base + x * step_x;
+    double dc_im = delta_c_y_base + y * step_y;
+    
+    double dz_re = 0.0;
+    double dz_im = 0.0;
+    
+    int n;
+    for (n = 0; n < max_iter; n++) {
+        double z_re = Z_ref_re[n];
+        double z_im = Z_ref_im[n];
+        
+        double z_dz_re = z_re * dz_re - z_im * dz_im;
+        double z_dz_im = z_re * dz_im + z_im * dz_re;
+        
+        double dz2_re = dz_re * dz_re - dz_im * dz_im;
+        double dz2_im = 2.0 * dz_re * dz_im;
+        
+        dz_re = 2.0 * z_dz_re + dz2_re + dc_re;
+        dz_im = 2.0 * z_dz_im + dz2_im + dc_im;
+        
+        double z_tot_re = z_re + dz_re;
+        double z_tot_im = z_im + dz_im;
+        
+        double z2 = z_tot_re * z_tot_re + z_tot_im * z_tot_im;
+        
+        // Aumentamos el radio de escape a 100 para que el suavizado sea matemáticamente preciso
+        if (z2 > 100.0) {
+            float log_z = logf((float)z2) / 2.0f;
+            float nu = log2f(log_z);
+            output[idx] = (float)n + 1.0f - nu;
+            return;
+        }
+    }
+    output[idx] = (float)max_iter;
+}
+''', 'mandelbrot_perturbacion')

@@ -2,10 +2,9 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtCore
-from PyQt5.QtWidgets import (QMainWindow, QGraphicsEllipseItem, QGraphicsScene, 
-                             QGraphicsView, QFileDialog, QInputDialog, QApplication, QProgressDialog)
-from PyQt5.QtGui import QBrush, QColor
-from PyQt5.QtCore import QPointF, QTimer, QThread, pyqtSignal
+from PyQt5.QtWidgets import (QMainWindow, QGraphicsScene, 
+                             QFileDialog, QInputDialog, QProgressDialog)
+from PyQt5.QtCore import QThread, pyqtSignal
 
 import core.funciones_ui as md
 import gui.tema_oscuro as ts
@@ -13,6 +12,8 @@ from gui.MandelbrotGUI import Ui_Boundary
 from OpenGL.GL import *
 from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY, calculos_mandelbrot
 from core.paletas import PALETTE_REGISTRY
+from decimal import Decimal, getcontext
+getcontext().prec= 100
 
 # --- HILO EN SEGUNDO PLANO PARA EL VIDEO ---
 class WorkerVideo(QThread):
@@ -74,44 +75,6 @@ class WorkerVideo(QThread):
 
         self.terminado.emit()
 
-# --- CLASES DE UI ---
-class Punto(QGraphicsEllipseItem):
-    def __init__(self, callback):
-        super().__init__(-10, -10, 20, 20)
-        self.setBrush(QBrush(QColor("white")))
-        self.setFlag(QGraphicsEllipseItem.ItemIsMovable, True)
-        self.setFlag(QGraphicsEllipseItem.ItemSendsGeometryChanges, True)
-        self.callback = callback
-
-    def itemChange(self, change, value):
-        if change == QGraphicsEllipseItem.ItemPositionChange:
-            new_x = max(0, min(200, value.x()))
-            new_y = max(0, min(200, value.y()))
-            self.callback(new_x, new_y)
-            return QPointF(new_x, new_y)
-        return super().itemChange(change, value) 
-
-class GraphicsViewFlechas(QGraphicsView):
-    def __init__(self, *args, punto=None, ui=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.punto = punto
-        self.ui = ui
-
-    def keyPressEvent(self, event):
-        try:
-            paso = float(self.ui.paso_entrada.text())
-        except Exception:
-            paso = 1
-        pos = self.punto.pos()
-        if event.key() == QtCore.Qt.Key_Left:
-            self.punto.setPos(max(0, pos.x() - paso), pos.y())
-        elif event.key() == QtCore.Qt.Key_Right:
-            self.punto.setPos(min(200, pos.x() + paso), pos.y())
-        elif event.key() == QtCore.Qt.Key_Up:
-            self.punto.setPos(pos.x(), max(0, pos.y() - paso))
-        elif event.key() == QtCore.Qt.Key_Down:
-            self.punto.setPos(pos.x(), min(200, pos.y() + paso))
-        super().keyPressEvent(event)
 
 
 class MainWindow(QMainWindow):
@@ -125,24 +88,12 @@ class MainWindow(QMainWindow):
         self.mandelbrot = md.mostrar_fractal_opengl(self.ui)
 
         self.scene = QGraphicsScene(0, 0, 200, 200)
-        self.punto = Punto(self.actualizar_coordenadas)
-        self.scene.addItem(self.punto)
-        self.punto.setPos(100, 100)
 
-        self.ui.graphicsView.__class__ = GraphicsViewFlechas
-        self.ui.graphicsView.punto = self.punto
-        self.ui.graphicsView.ui = self.ui 
-        self.ui.graphicsView.setScene(self.scene)
-        self.ui.graphicsView.setSceneRect(0, 0, 200, 200)
-        self.ui.graphicsView.setFixedSize(200, 200)
-        self.ui.graphicsView.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.ui.graphicsView.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarAlwaysOff)
-        self.ui.graphicsView.setInteractive(True)
 
-        self.ui.formula_entrada.setText("z**2 + c")
+
+
         self.scene.changed.connect(self.al_interactuar)
-        self.ui.graphicsView.setFocus()
-        
+
         self.inicializar_combos()
         self._conectar_mvc()
         self._conectar_botones()
@@ -192,35 +143,35 @@ class MainWindow(QMainWindow):
         self.ui.boton_dividir_clase_equiv.clicked.connect(self.dividir_clase)
         self.ui.boton_resetear.clicked.connect(self.resetear_vista)
 
-    # --- MÉTODOS DE SINCRONIZACIÓN ---
+
     def sincronizar_hacia_motor(self, *args):
         try:
+            xmin = Decimal(self.ui.xmin_entrada.text())
+            xmax = Decimal(self.ui.xmax_entrada.text())
+            ymin = Decimal(self.ui.ymin_entrada.text())
+            ymax = Decimal(self.ui.ymax_entrada.text())
+            zoom_in = Decimal(self.ui.zoom_in_factor_entrada.text())
+            zoom_out = Decimal(self.ui.zoom_out_factor_entrada.text())
+            real = 0.1
+            imag = 0.1
             cmap = self.ui.cmap_comboBox.currentText()
-            xmin = float(self.ui.xmin_entrada.text())
-            xmax = float(self.ui.xmax_entrada.text())
-            ymin = float(self.ui.ymin_entrada.text())
-            ymax = float(self.ui.ymax_entrada.text())
             width = int(self.ui.width_entrada.text())
             height = int(self.ui.high_entrada.text())
             max_iter = int(self.ui.max_iter_entrada.text())
-            formula = self.ui.formula_entrada.text()
             tipo_calculo = self.ui.tipo_calculo_comboBox.currentText()
             tipo_fractal = self.ui.tipo_fractal_comboBox.currentText()
-            zoom_in = float(self.ui.zoom_in_factor_entrada.text())
-            zoom_out = float(self.ui.zoom_out_factor_entrada.text())
             clase_equiv = int(self.ui.clase_equiv_entrada.text())
-            real = float(self.ui.real_julia_entrada.text())
-            imag = float(self.ui.im_julia_entrada.text())
+
             
             self.mandelbrot.actualizar_estado_desde_ui(
-                cmap, width, height, max_iter, formula, tipo_calculo, tipo_fractal, 
+                cmap, width, height, max_iter, tipo_calculo, tipo_fractal, 
                 zoom_in, zoom_out, clase_equiv, real, imag
             )
             self.mandelbrot.xmin, self.mandelbrot.xmax = xmin, xmax
             self.mandelbrot.ymin, self.mandelbrot.ymax = ymin, ymax
 
             self.mandelbrot.corregir_aspect_ratio()
-            
+
             self.mandelbrot.update()
         except ValueError:
             pass 
