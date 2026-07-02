@@ -1,5 +1,6 @@
 #include <gmp.h>
 #include <stdlib.h>
+#include <omp.h>
 
 extern "C" {
     __declspec(dllexport) void calcular_orbita_referencia(
@@ -75,5 +76,49 @@ extern "C" {
 
         mpf_clears(c_re, c_im, z_re, z_im, z_re2, z_im2, temp, NULL);
         mpf_clears(old_z_re, old_z_im, diff_re, diff_im, eps, NULL);
+    }
+
+    __declspec(dllexport) void calcular_deltas_cpp(
+            const double* Z_ref_re, const double* Z_ref_im,
+            double dc_x_base, double dc_y_base,
+            double step_x, double step_y,
+            int width, int height, int max_iter,
+            int* output) 
+    {
+        #pragma omp parallel for collapse(2)
+        for (int j = 0; j < height; ++j) {
+            for (int i = 0; i < width; ++i) {
+                // Se calcula Delta C sin usar las coordenadas absolutas
+                double dc_re = dc_x_base + i * step_x;
+                double dc_im = dc_y_base + j * step_y;
+
+                double dz_re = 0.0;
+                double dz_im = 0.0;
+
+                int n = 0;
+                while (n < max_iter) {
+                    double z_ref_re = Z_ref_re[n];
+                    double z_ref_im = Z_ref_im[n];
+
+                    double z_tot_re = z_ref_re + dz_re;
+                    double z_tot_im = z_ref_im + dz_im;
+
+                    if (z_tot_re * z_tot_re + z_tot_im * z_tot_im > 4.0) {
+                        break;
+                    }
+
+                    double dz_re_sq = dz_re * dz_re - dz_im * dz_im;
+                    double dz_im_sq = 2.0 * dz_re * dz_im;
+
+                    double dz_new_re = 2.0 * (z_ref_re * dz_re - z_ref_im * dz_im) + dz_re_sq + dc_re;
+                    double dz_new_im = 2.0 * (z_ref_re * dz_im + z_ref_im * dz_re) + dz_im_sq + dc_im;
+
+                    dz_re = dz_new_re;
+                    dz_im = dz_new_im;
+                    n++;
+                }
+                output[j * width + i] = n;
+            }
+        }
     }
 }

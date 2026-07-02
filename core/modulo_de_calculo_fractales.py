@@ -8,28 +8,53 @@ from functools import wraps
 from .backend_cpp import *
 from decimal import Decimal
 from core.funciones_kernel import mandelbrot_perturbacion_kernel
+import os
+import ctypes
 
-ruta_dll_pert = os.path.join(os.path.dirname(__file__), '..', 'codigos_cpp', 'perturbacion.dll')
+
+ruta_cpp = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'codigos_cpp'))
+
+if hasattr(os, 'add_dll_directory'):
+    os.add_dll_directory(ruta_cpp)
+
+ruta_dll_pert = os.path.join(ruta_cpp, 'perturbacion.dll')
 try:
-    lib_pert = ctypes.CDLL(ruta_dll_pert)
+    lib_pert = ctypes.CDLL(ruta_dll_pert, winmode=0)
+    
+    # Firma para calcular_orbita_referencia
     lib_pert.calcular_orbita_referencia.argtypes = [
         ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
         np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
         np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS')
     ]
     lib_pert.calcular_orbita_referencia.restype = None
+
+    # Firma para calcular_deltas_cpp
+    lib_pert.calcular_deltas_cpp.argtypes = [
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+        np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+        ctypes.c_double, ctypes.c_double,
+        ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+        ctypes.c_int, ctypes.c_int, ctypes.c_int,
+        np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
+    ]
+    lib_pert.calcular_deltas_cpp.restype = None
+
 except Exception as e:
     print(f"Advertencia: No se pudo cargar perturbacion.dll - {e}")
 
-ruta_dll_gmp = os.path.join(os.path.dirname(__file__), '..', 'codigos_cpp', 'gmp_puro.dll')
+ruta_dll_gmp = os.path.join(ruta_cpp, 'gmp_puro.dll')
 try:
-    lib_gmp_puro = ctypes.CDLL(ruta_dll_gmp)
+    lib_gmp_puro = ctypes.CDLL(ruta_dll_gmp, winmode=0)
+    
+    # Firma para calcular_mandelbrot_gmp_puro
     lib_gmp_puro.calcular_mandelbrot_gmp_puro.argtypes = [
         ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
     ]
     lib_gmp_puro.calcular_mandelbrot_gmp_puro.restype = None
+
 except Exception as e:
     print(f"Advertencia: No se pudo cargar gmp_puro.dll - {e}")
 
@@ -238,6 +263,40 @@ class calculos_mandelbrot:
         )
 
         return output
+    
+    @register_fractal("Mandelbrot", "perturbacion_cpu")
+    @medir_tiempo("Mandelbrot Perturbacion CPU")
+    def hacer_mandelbrot_perturbacion_cpu(self):
+        c_re_dec = (Decimal(self.xmin) + Decimal(self.xmax)) / Decimal('2')
+        c_im_dec = (Decimal(self.ymin) + Decimal(self.ymax)) / Decimal('2')
+
+        c_re_str = str(c_re_dec).encode('utf-8')
+        c_im_str = str(c_im_dec).encode('utf-8')
+
+        Z_ref_re = np.zeros(self.max_iter, dtype=np.float64)
+        Z_ref_im = np.zeros(self.max_iter, dtype=np.float64)
+
+        lib_pert.calcular_orbita_referencia(c_re_str, c_im_str, self.max_iter, Z_ref_re, Z_ref_im)
+
+        # Calculo preciso de deltas en Python usando Decimal
+        delta_c_x_base = float(Decimal(self.xmin) - c_re_dec)
+        delta_c_y_base = float(Decimal(self.ymin) - c_im_dec)
+        step_x = float((Decimal(self.xmax) - Decimal(self.xmin)) / Decimal(self.width))
+        step_y = float((Decimal(self.ymax) - Decimal(self.ymin)) / Decimal(self.height))
+
+        output = np.zeros((self.height, self.width), dtype=np.int32)
+
+        lib_pert.calcular_deltas_cpp.argtypes = [
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
+            ctypes.c_double, ctypes.c_double,
+            ctypes.c_double, ctypes.c_double,
+            ctypes.c_int, ctypes.c_int, ctypes.c_int,
+            np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
+        ]
+
+        return output
+    
     #########
     # Julia #
     #########
