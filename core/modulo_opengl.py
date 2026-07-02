@@ -6,15 +6,17 @@ from core.modulo_de_calculo_fractales import calculos_mandelbrot
 from core.paletas import PALETTE_REGISTRY
 from decimal import Decimal
 
+
 class MandelbrotWidget(QOpenGLWidget):
     # --- SEÑALES MVC ---
     coordenadas_raton_cambiadas = pyqtSignal(float, float)
     limites_zoom_cambiados = pyqtSignal(float, float, float, float)
     parametros_matematicos_cambiados = pyqtSignal(int, int)
 
-    def __init__(self, cmap, xmin, xmax, ymin, ymax, width, height, max_iter,  tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
+    def __init__(self, cmap, xmin, xmax, ymin, ymax, width, height, max_iter,
+                 tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
         super().__init__()
-        self.cmap = cmap    
+        self.cmap = cmap
         self.xmin = xmin
         self.xmax = xmax
         self.ymin = ymin
@@ -33,21 +35,76 @@ class MandelbrotWidget(QOpenGLWidget):
         self.zoom_factor = Decimal('1.0')
         self.dragging = False
         self.last_pos = None
-        self.mandelbrot = calculos_mandelbrot(self.xmin, self.xmax, self.ymin, self.ymax, self.width, self.height, self.max_iter, self.tipo_calculo, self.tipo_fractal)                               
+
+        self.mandelbrot = calculos_mandelbrot(
+            self.xmin, self.xmax, self.ymin, self.ymax,
+            self.width, self.height, self.max_iter,
+            self.tipo_calculo, self.tipo_fractal
+        )
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
-        
-        self.palettes = PALETTE_REGISTRY 
+
+        self.palettes = PALETTE_REGISTRY
         self.palette_index = 0
 
+        # === NUEVO SISTEMA DE CALIDAD PROGRESIVA ===
+        self.resolucion_adaptativa_activa = True
+        self.quality_level = "high"          # low | medium | high
         self.render_timer = QTimer(self)
         self.render_timer.setSingleShot(True)
-        self.render_timer.timeout.connect(self.ejecutar_alta_resolucion)
-        self.is_preview_mode = False
-        self.resolucion_adaptativa_activa = True
+        self.render_timer.timeout.connect(self._avanzar_calidad)
 
-    def actualizar_estado_desde_ui(self, cmap, width, height, max_iter,  tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
+        # Tiempos de refinamiento (en milisegundos)
+        self.TIEMPO_MEDIUM = 400
+        self.TIEMPO_HIGH = 1200
+
+    # ============================================================
+    #                    SISTEMA DE CALIDAD PROGRESIVA
+    # ============================================================
+
+    def _set_quality_level(self, level):
+        """Cambia el nivel de calidad y fuerza redraw"""
+        if level != self.quality_level:
+            self.quality_level = level
+            self.update()
+    def interaccion_rapida(self):
+        """Se llama en cada movimiento/zoom. Mantiene baja calidad mientras el usuario interactúa."""
+        if not self.resolucion_adaptativa_activa:
+            self.update()
+            return
+
+        self.render_timer.stop()
+
+        # Forzamos calidad baja inmediatamente
+        if self.quality_level != "low":
+            self.quality_level = "low"
+
+        self.update()                    # ← Esto es clave: redibuja YA en baja calidad
+        self.render_timer.start(self.TIEMPO_MEDIUM)
+
+    def _avanzar_calidad(self):
+        """Solo se ejecuta cuando el usuario deja de interactuar por un tiempo."""
+        if self.quality_level == "low":
+            self.quality_level = "medium"
+            self.update()
+            self.render_timer.start(self.TIEMPO_HIGH - self.TIEMPO_MEDIUM)
+        elif self.quality_level == "medium":
+            self.quality_level = "high"
+            self.update()
+
+    def toggle_resolucion_adaptativa(self):
+        """Activa/desactiva el modo adaptativo (tecla Q)"""
+        self.resolucion_adaptativa_activa = not self.resolucion_adaptativa_activa
+        if not self.resolucion_adaptativa_activa:
+            self.quality_level = "high"
+            self.render_timer.stop()
+        self.update()
+
+    # ============================================================
+
+    def actualizar_estado_desde_ui(self, cmap, width, height, max_iter, tipo_calculo,
+                                   tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
         self.cmap = cmap
         self.width = width
         self.height = height
@@ -60,20 +117,6 @@ class MandelbrotWidget(QOpenGLWidget):
         self.real = real
         self.imag = imag
 
-    def interaccion_rapida(self):
-        if self.resolucion_adaptativa_activa:
-            self.is_preview_mode = True
-            self.render_timer.stop()
-            self.update() 
-            self.render_timer.start(500) 
-        else:
-            self.is_preview_mode = False
-            self.update()
-
-    def ejecutar_alta_resolucion(self):
-        self.is_preview_mode = False
-        self.update()
-
     def next_palette(self):
         self.palette_index = (self.palette_index + 1) % len(self.palettes)
         self.update()
@@ -83,11 +126,15 @@ class MandelbrotWidget(QOpenGLWidget):
         self.update()
 
     def obtener_frame_rgb(self, render_w, render_h):
-        self.mandelbrot.actualizar_fractal(self.xmin, self.xmax, self.ymin, self.ymax, render_w, render_h, self.max_iter, self.tipo_calculo, self.tipo_fractal, self.real, self.imag)
+        self.mandelbrot.actualizar_fractal(
+            self.xmin, self.xmax, self.ymin, self.ymax,
+            render_w, render_h, self.max_iter, self.tipo_calculo,
+            self.tipo_fractal, self.real, self.imag
+        )
         data = self.mandelbrot.calcular_fractal()
         norm = data.astype(float) / self.max_iter
         _, func = self.palettes[self.palette_index]
-        return func(norm, self.max_iter, self.clase_equiv, getattr(self, 't_actual', 0.0), getattr(self, 'thickness', 0.0))
+        return func(norm, self.max_iter, self.clase_equiv)
 
     def initializeGL(self):
         glClearColor(0, 0, 0, 1)
@@ -96,57 +143,60 @@ class MandelbrotWidget(QOpenGLWidget):
     def pixel_a_complejo(self, x, y):
         prop_x = Decimal(x) / Decimal(self.width)
         prop_y = Decimal('1') - (Decimal(y) / Decimal(self.height))
-        
         real = self.xmin + prop_x * (self.xmax - self.xmin)
         imag = self.ymin + prop_y * (self.ymax - self.ymin)
         return real, imag
-    
+
     def corregir_aspect_ratio(self):
-        if self.height == 0: return
-        
+        if self.height == 0:
+            return
         aspect_ratio = Decimal(self.width) / Decimal(self.height)
-        
         centro_y = (self.ymin + self.ymax) / Decimal('2')
         ancho_actual = self.xmax - self.xmin
         alto_corregido = ancho_actual / aspect_ratio
-        
         self.ymin = centro_y - alto_corregido / Decimal('2')
         self.ymax = centro_y + alto_corregido / Decimal('2')
-        
-        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax), float(self.ymin), float(self.ymax))
+        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
+                                         float(self.ymin), float(self.ymax))
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
         glLoadIdentity()
 
-        factor_escala = 4.0 if (self.is_preview_mode or getattr(self, 'modo_baja_res_fijo', False)) else 1.0
-        render_w = int(self.width / factor_escala)
-        render_h = int(self.height / factor_escala)
+        # === Determinar resolución según nivel de calidad ===
+        if self.quality_level == "low":
+            factor = 8.0
+        elif self.quality_level == "medium":
+            factor = 2.0
+        else:  # high
+            factor = 1.0
+
+        render_w = max(1, int(self.width / factor))
+        render_h = max(1, int(self.height / factor))
 
         f_xmin, f_xmax = float(self.xmin), float(self.xmax)
         f_ymin, f_ymax = float(self.ymin), float(self.ymax)
         f_real, f_imag = float(self.real), float(self.imag)
 
-        self.mandelbrot.actualizar_fractal(f_xmin, f_xmax, f_ymin, f_ymax, render_w, render_h, self.max_iter, self.tipo_calculo, self.tipo_fractal, f_real, f_imag)
-        
-        x = np.linspace(f_xmin, f_xmax, render_w)
-        y = np.linspace(f_ymin, f_ymax, render_h)
-        X, Y = np.meshgrid(x, y)
-        self.mandelbrot.Z = X + 1j * Y
+        self.mandelbrot.actualizar_fractal(
+            f_xmin, f_xmax, f_ymin, f_ymax,
+            render_w, render_h, self.max_iter,
+            self.tipo_calculo, self.tipo_fractal, f_real, f_imag
+        )
 
         try:
             data = self.mandelbrot.calcular_fractal()
         except RuntimeError as e:
             print(e)
-            glClearColor(1.0, 0.0, 0.0, 1.0) 
+            glClearColor(1.0, 0.0, 0.0, 1.0)
             glClear(GL_COLOR_BUFFER_BIT)
             return
 
-        norm = data / self.max_iter 
+        norm = data / self.max_iter
         _, func = self.palettes[self.palette_index]
-        rgb = func(norm, self.max_iter, self.clase_equiv, getattr(self, 't_actual', 0.0), getattr(self, 'thickness', 0.0))
+        rgb = func(norm, self.max_iter, self.clase_equiv)
 
-        glPixelZoom(factor_escala, factor_escala)
+        glPixelZoom(factor, factor)
         glDrawPixels(render_w, render_h, GL_RGB, GL_UNSIGNED_BYTE, rgb)
         glPixelZoom(1.0, 1.0)
 
@@ -156,6 +206,8 @@ class MandelbrotWidget(QOpenGLWidget):
         glViewport(0, 0, w, h)
         self.corregir_aspect_ratio()
         self.update()
+
+    # ==================== EVENTOS DE MOUSE Y TECLADO ====================
 
     def wheelEvent(self, event):
         zoom = 0.9 if event.angleDelta().y() > 0 else 1.1
@@ -177,86 +229,89 @@ class MandelbrotWidget(QOpenGLWidget):
     def mouseMoveEvent(self, event):
         x, y = event.x(), event.y()
         real, imag = self.pixel_a_complejo(x, y)
-
-        self.coordenadas_raton_cambiadas.emit(float(real), float(imag)) 
+        self.coordenadas_raton_cambiadas.emit(float(real), float(imag))
 
         if self.dragging:
             c0_real, c0_imag = self.pixel_a_complejo(self.last_pos.x(), self.last_pos.y())
             dx = c0_real - real
-            dy = c0_imag - imag
+            dy = c0_imag - imag          # ← CORREGIDO (antes decía "- real")
             self.xmin += dx
             self.xmax += dx
             self.ymin += dy
             self.ymax += dy
             self.last_pos = event.pos()
-            self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax), float(self.ymin), float(self.ymax))
+            self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
+                                             float(self.ymin), float(self.ymax))
             self.interaccion_rapida()
-
     def _aplicar_zoom(self, factor):
-        factor_dec = Decimal(str(factor)) 
-        
+        factor_dec = Decimal(str(factor))
         c_x, c_y = (self.xmin + self.xmax) / Decimal('2'), (self.ymin + self.ymax) / Decimal('2')
         dx = (self.xmax - self.xmin) * factor_dec / Decimal('2')
         dy = (self.ymax - self.ymin) * factor_dec / Decimal('2')
-        
         self.xmin, self.xmax = c_x - dx, c_x + dx
         self.ymin, self.ymax = c_y - dy, c_y + dy
-        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax), float(self.ymin), float(self.ymax))
+        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
+                                         float(self.ymin), float(self.ymax))
         self.interaccion_rapida()
 
     def _centrar_y_zoom(self, px, py, factor):
         factor_dec = Decimal(str(factor))
         prop_x = Decimal(px) / Decimal(self.width)
         prop_y = Decimal(py) / Decimal(self.height)
-        
         c_x = self.xmin + prop_x * (self.xmax - self.xmin)
         c_y = self.ymin + prop_y * (self.ymax - self.ymin)
-        
         self.xmin = c_x - (c_x - self.xmin) * factor_dec
         self.xmax = c_x + (self.xmax - c_x) * factor_dec
         self.ymin = c_y - (c_y - self.ymin) * factor_dec
         self.ymax = c_y + (self.ymax - c_y) * factor_dec
-        
-        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax), float(self.ymin), float(self.ymax))
+        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
+                                         float(self.ymin), float(self.ymax))
         self.interaccion_rapida()
 
     def keyPressEvent(self, event):
         move = Decimal('0.05')
         dx, dy = (self.xmax - self.xmin) * move, (self.ymax - self.ymin) * move
-        
-        if event.key() in (Qt.Key_Left, Qt.Key_A): self.xmin, self.xmax = self.xmin - dx, self.xmax - dx
-        elif event.key() in (Qt.Key_Right, Qt.Key_D): self.xmin, self.xmax = self.xmin + dx, self.xmax + dx
-        elif event.key() in (Qt.Key_Up, Qt.Key_W): self.ymin, self.ymax = self.ymin + dy, self.ymax + dy
-        elif event.key() in (Qt.Key_Down, Qt.Key_S): self.ymin, self.ymax = self.ymin - dy, self.ymax - dy
-        elif event.key() == Qt.Key_Plus: self._aplicar_zoom(self.zoom_in)
-        elif event.key() == Qt.Key_Minus: self._aplicar_zoom(self.zoom_out)
-        elif event.key() == Qt.Key_P: self.next_palette()
-        elif event.key() == Qt.Key_O: self.previous_palette()
-        elif event.key() == Qt.Key_R: 
+
+        if event.key() in (Qt.Key_Left, Qt.Key_A):
+            self.xmin, self.xmax = self.xmin - dx, self.xmax - dx
+        elif event.key() in (Qt.Key_Right, Qt.Key_D):
+            self.xmin, self.xmax = self.xmin + dx, self.xmax + dx
+        elif event.key() in (Qt.Key_Up, Qt.Key_W):
+            self.ymin, self.ymax = self.ymin + dy, self.ymax + dy
+        elif event.key() in (Qt.Key_Down, Qt.Key_S):
+            self.ymin, self.ymax = self.ymin - dy, self.ymax - dy
+        elif event.key() == Qt.Key_Plus:
+            self._aplicar_zoom(self.zoom_in)
+        elif event.key() == Qt.Key_Minus:
+            self._aplicar_zoom(self.zoom_out)
+        elif event.key() == Qt.Key_P:
+            self.next_palette()
+        elif event.key() == Qt.Key_O:
+            self.previous_palette()
+        elif event.key() == Qt.Key_R:
             self.xmin, self.xmax = Decimal('-2.0'), Decimal('1.2')
             self.ymin, self.ymax = Decimal('-0.9'), Decimal('0.9')
             self.max_iter, self.clase_equiv = 256, 128
             self.corregir_aspect_ratio()
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_G: 
+        elif event.key() == Qt.Key_G:
             self.max_iter = int(self.max_iter * 2)
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_H: 
+        elif event.key() == Qt.Key_H:
             self.max_iter = max(1, int(self.max_iter / 2))
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_B: 
+        elif event.key() == Qt.Key_B:
             self.clase_equiv = int(self.clase_equiv * 2)
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_N: 
+        elif event.key() == Qt.Key_N:
             self.clase_equiv = max(1, int(self.clase_equiv / 2))
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
         elif event.key() == Qt.Key_Q:
-            self.resolucion_adaptativa_activa = not self.resolucion_adaptativa_activa
-            if not self.resolucion_adaptativa_activa:
-                self.is_preview_mode = False
-                self.render_timer.stop()
+            self.toggle_resolucion_adaptativa()
 
-        if event.key() in (Qt.Key_Left, Qt.Key_A, Qt.Key_Right, Qt.Key_D, Qt.Key_Up, Qt.Key_W, Qt.Key_Down, Qt.Key_S):
-            self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax), float(self.ymin), float(self.ymax))
+        if event.key() in (Qt.Key_Left, Qt.Key_A, Qt.Key_Right, Qt.Key_D,
+                           Qt.Key_Up, Qt.Key_W, Qt.Key_Down, Qt.Key_S):
+            self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
+                                             float(self.ymin), float(self.ymax))
 
         self.interaccion_rapida()

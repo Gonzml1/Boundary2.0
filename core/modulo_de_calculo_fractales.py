@@ -150,7 +150,7 @@ class calculos_mandelbrot:
     
     @register_fractal("Mandelbrot", "GPU_Cupy_kernel_optimizado")
     @medir_tiempo("Mandelbrot GPU optimizado")
-    def hacer_mandelbrot_gpu(self) -> np.ndarray:
+    def hacer_mandelbrot_gpu2(self) -> np.ndarray:
         C = self._generar_malla_compleja_gpu()
         C = C.ravel() 
         
@@ -183,34 +183,26 @@ class calculos_mandelbrot:
     @register_fractal("Mandelbrot", "perturbacion")
     @medir_tiempo("Mandelrbot pertubation")
     def hacer_mandelbrot_perturbacion(self):
-        # 1. Calcular el centro matemático con precisión absoluta
         c_re = (Decimal(self.xmin) + Decimal(self.xmax)) / Decimal('2')
         c_im = (Decimal(self.ymin) + Decimal(self.ymax)) / Decimal('2')
 
-        # Convertir a strings de bytes para C++
         c_re_str = str(c_re).encode('utf-8')
         c_im_str = str(c_im).encode('utf-8')
 
-        # 2. Preparar memoria para recibir la órbita de referencia
         Z_ref_re = np.zeros(self.max_iter, dtype=np.float64)
         Z_ref_im = np.zeros(self.max_iter, dtype=np.float64)
 
-        # 3. Llamar a C++ (GMP) para calcular el centro
         lib_pert.calcular_orbita_referencia(c_re_str, c_im_str, self.max_iter, Z_ref_re, Z_ref_im)
 
-        # Subir la órbita a la memoria de la placa de video
         d_Z_ref_re = cp.asarray(Z_ref_re)
         d_Z_ref_im = cp.asarray(Z_ref_im)
 
-        # 4. Calcular el Delta base (Esquina superior izquierda vs Centro)
         delta_c_x_base = float(Decimal(self.xmin) - c_re)
         delta_c_y_base = float(Decimal(self.ymin) - c_im)
 
-        # Calcular el salto por cada pixel (Step)
         step_x = float((Decimal(self.xmax) - Decimal(self.xmin)) / Decimal(self.width))
         step_y = float((Decimal(self.ymax) - Decimal(self.ymin)) / Decimal(self.height))
 
-        # 5. Preparar la salida de la GPU
         output = cp.zeros((self.height, self.width), dtype=cp.int32)
 
         threadsperblock = (16, 16)
@@ -218,7 +210,6 @@ class calculos_mandelbrot:
         blockspergrid_y = int(np.ceil(self.height / threadsperblock[1]))
         blockspergrid = (blockspergrid_x, blockspergrid_y)
 
-        # 6. Lanzar el kernel
         mandelbrot_perturbacion_kernel(
             blockspergrid, threadsperblock,
             (d_Z_ref_re, d_Z_ref_im,
@@ -226,8 +217,6 @@ class calculos_mandelbrot:
             np.float64(step_x), np.float64(step_y),
             output, np.int32(self.max_iter), np.int32(self.width), np.int32(self.height))
         )
-
-        # 7. Devolver a la CPU para colorear
         return output.get()
     
     @register_fractal("Mandelbrot", "gmp")
