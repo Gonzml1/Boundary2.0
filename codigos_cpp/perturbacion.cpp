@@ -3,7 +3,7 @@
 #include <omp.h>
 
 extern "C" {
-    __declspec(dllexport) void calcular_orbita_referencia(
+    __declspec(dllexport) int calcular_orbita_referencia(
         const char* c_re_str, const char* c_im_str, 
         int max_iter, double* out_re, double* out_im) 
     {
@@ -27,6 +27,7 @@ extern "C" {
 
         int period_check_interval = 1;
         int steps_to_check = 1;
+        int iter_alcanzadas = max_iter;
 
         for (int i = 0; i < max_iter; i++) {
             out_re[i] = mpf_get_d(z_re);
@@ -37,6 +38,7 @@ extern "C" {
             
             mpf_add(temp, z_re2, z_im2);
             if (mpf_cmp_d(temp, 4.0) > 0) {
+                iter_alcanzadas = i;
                 for (int j = i + 1; j < max_iter; j++) {
                     out_re[j] = out_re[i];
                     out_im[j] = out_im[i];
@@ -76,19 +78,20 @@ extern "C" {
 
         mpf_clears(c_re, c_im, z_re, z_im, z_re2, z_im2, temp, NULL);
         mpf_clears(old_z_re, old_z_im, diff_re, diff_im, eps, NULL);
+        
+        return iter_alcanzadas;
     }
 
     __declspec(dllexport) void calcular_deltas_cpp(
-            const double* Z_ref_re, const double* Z_ref_im,
-            double dc_x_base, double dc_y_base,
-            double step_x, double step_y,
-            int width, int height, int max_iter,
-            int* output) 
+        const double* Z_ref_re, const double* Z_ref_im,
+        double dc_x_base, double dc_y_base,
+        double step_x, double step_y,
+        int width, int height, int max_iter,
+        int* output) 
     {
         #pragma omp parallel for collapse(2)
         for (int j = 0; j < height; ++j) {
             for (int i = 0; i < width; ++i) {
-                // Se calcula Delta C sin usar las coordenadas absolutas
                 double dc_re = dc_x_base + i * step_x;
                 double dc_im = dc_y_base + j * step_y;
 
@@ -103,9 +106,7 @@ extern "C" {
                     double z_tot_re = z_ref_re + dz_re;
                     double z_tot_im = z_ref_im + dz_im;
 
-                    if (z_tot_re * z_tot_re + z_tot_im * z_tot_im > 4.0) {
-                        break;
-                    }
+                    if (z_tot_re * z_tot_re + z_tot_im * z_tot_im > 4.0) break;
 
                     double dz_re_sq = dz_re * dz_re - dz_im * dz_im;
                     double dz_im_sq = 2.0 * dz_re * dz_im;

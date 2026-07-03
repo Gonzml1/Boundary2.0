@@ -13,7 +13,6 @@ import ctypes
 
 
 ruta_cpp = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'codigos_cpp'))
-
 if hasattr(os, 'add_dll_directory'):
     os.add_dll_directory(ruta_cpp)
 
@@ -21,20 +20,19 @@ ruta_dll_pert = os.path.join(ruta_cpp, 'perturbacion.dll')
 try:
     lib_pert = ctypes.CDLL(ruta_dll_pert, winmode=0)
     
-    # Firma para calcular_orbita_referencia
     lib_pert.calcular_orbita_referencia.argtypes = [
         ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int,
         np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
         np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS')
     ]
-    lib_pert.calcular_orbita_referencia.restype = None
+    lib_pert.calcular_orbita_referencia.restype = ctypes.c_int
 
-    # Firma para calcular_deltas_cpp
+    # EXACTAMENTE 10 ARGUMENTOS AQUÍ
     lib_pert.calcular_deltas_cpp.argtypes = [
         np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
         np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
         ctypes.c_double, ctypes.c_double,
-        ctypes.c_double, ctypes.c_double, ctypes.c_double, ctypes.c_double,
+        ctypes.c_double, ctypes.c_double,
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
     ]
@@ -46,15 +44,12 @@ except Exception as e:
 ruta_dll_gmp = os.path.join(ruta_cpp, 'gmp_puro.dll')
 try:
     lib_gmp_puro = ctypes.CDLL(ruta_dll_gmp, winmode=0)
-    
-    # Firma para calcular_mandelbrot_gmp_puro
     lib_gmp_puro.calcular_mandelbrot_gmp_puro.argtypes = [
         ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
         ctypes.c_int, ctypes.c_int, ctypes.c_int,
         np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
     ]
     lib_gmp_puro.calcular_mandelbrot_gmp_puro.restype = None
-
 except Exception as e:
     print(f"Advertencia: No se pudo cargar gmp_puro.dll - {e}")
 
@@ -205,44 +200,66 @@ class calculos_mandelbrot:
         free_mandelbrot(ptr)
         return img
     
-    @register_fractal("Mandelbrot", "perturbacion")
-    @medir_tiempo("Mandelrbot pertubation")
-    def hacer_mandelbrot_perturbacion(self):
-        c_re = (Decimal(self.xmin) + Decimal(self.xmax)) / Decimal('2')
-        c_im = (Decimal(self.ymin) + Decimal(self.ymax)) / Decimal('2')
+    @register_fractal("Mandelbrot", "perturbacion_cpu")
+    @medir_tiempo("Mandelbrot Perturbacion CPU")
+    def hacer_mandelbrot_perturbacion_cpu(self):
+        c_re_center = (Decimal(self.xmin) + Decimal(self.xmax)) / Decimal('2')
+        c_im_center = (Decimal(self.ymin) + Decimal(self.ymax)) / Decimal('2')
 
-        c_re_str = str(c_re).encode('utf-8')
-        c_im_str = str(c_im).encode('utf-8')
+        step_x_dec = (Decimal(self.xmax) - Decimal(self.xmin)) / Decimal(self.width)
+        step_y_dec = (Decimal(self.ymax) - Decimal(self.ymin)) / Decimal(self.height)
 
-        Z_ref_re = np.zeros(self.max_iter, dtype=np.float64)
-        Z_ref_im = np.zeros(self.max_iter, dtype=np.float64)
+        # Matriz en cruz (Centro, Derecha, Izquierda, Arriba, Abajo)
+        offset_multiplier = Decimal('10') # Evaluamos puntos un poco alejados del centro
+        puntos_prueba = [
+            (c_re_center, c_im_center),
+            (c_re_center + step_x_dec * offset_multiplier, c_im_center),
+            (c_re_center - step_x_dec * offset_multiplier, c_im_center),
+            (c_re_center, c_im_center + step_y_dec * offset_multiplier),
+            (c_re_center, c_im_center - step_y_dec * offset_multiplier)
+        ]
 
-        lib_pert.calcular_orbita_referencia(c_re_str, c_im_str, self.max_iter, Z_ref_re, Z_ref_im)
+        best_re, best_im = c_re_center, c_im_center
+        max_iters_found = -1
+        Z_ref_re = None
+        Z_ref_im = None
 
-        d_Z_ref_re = cp.asarray(Z_ref_re)
-        d_Z_ref_im = cp.asarray(Z_ref_im)
+        # 1. Búsqueda inteligente de la órbita de referencia
+        for p_re, p_im in puntos_prueba:
+            Z_re_tmp = np.zeros(self.max_iter, dtype=np.float64)
+            Z_im_tmp = np.zeros(self.max_iter, dtype=np.float64)
 
-        delta_c_x_base = float(Decimal(self.xmin) - c_re)
-        delta_c_y_base = float(Decimal(self.ymin) - c_im)
+            iters = lib_pert.calcular_orbita_referencia(
+                str(p_re).encode('utf-8'), str(p_im).encode('utf-8'), 
+                self.max_iter, Z_re_tmp, Z_im_tmp
+            )
 
-        step_x = float((Decimal(self.xmax) - Decimal(self.xmin)) / Decimal(self.width))
-        step_y = float((Decimal(self.ymax) - Decimal(self.ymin)) / Decimal(self.height))
+            if iters > max_iters_found:
+                max_iters_found = iters
+                best_re, best_im = p_re, p_im
+                Z_ref_re, Z_ref_im = Z_re_tmp, Z_im_tmp
+                
+                # Si el punto no escapa, es la referencia perfecta, detenemos la búsqueda
+                if iters == self.max_iter:
+                    break 
 
-        output = cp.zeros((self.height, self.width), dtype=cp.int32)
+        # 2. Calcular los deltas tomando la mejor base matemática encontrada
+        delta_c_x_base = float(Decimal(self.xmin) - best_re)
+        delta_c_y_base = float(Decimal(self.ymin) - best_im)
+        step_x = float(step_x_dec)
+        step_y = float(step_y_dec)
 
-        threadsperblock = (16, 16)
-        blockspergrid_x = int(np.ceil(self.width / threadsperblock[0]))
-        blockspergrid_y = int(np.ceil(self.height / threadsperblock[1]))
-        blockspergrid = (blockspergrid_x, blockspergrid_y)
+        output = np.zeros((self.height, self.width), dtype=np.int32)
 
-        mandelbrot_perturbacion_kernel(
-            blockspergrid, threadsperblock,
-            (d_Z_ref_re, d_Z_ref_im,
-            np.float64(delta_c_x_base), np.float64(delta_c_y_base),
-            np.float64(step_x), np.float64(step_y),
-            output, np.int32(self.max_iter), np.int32(self.width), np.int32(self.height))
+        lib_pert.calcular_deltas_cpp(
+            Z_ref_re, Z_ref_im,
+            delta_c_x_base, delta_c_y_base,
+            step_x, step_y,
+            self.width, self.height, self.max_iter,
+            output
         )
-        return output.get()
+
+        return output
     
     @register_fractal("Mandelbrot", "gmp")
     @medir_tiempo("Gmp")
@@ -278,7 +295,7 @@ class calculos_mandelbrot:
 
         lib_pert.calcular_orbita_referencia(c_re_str, c_im_str, self.max_iter, Z_ref_re, Z_ref_im)
 
-        # Calculo preciso de deltas en Python usando Decimal
+        # Calculo en Python con Decimal, le pasamos doubles ligeros a C++
         delta_c_x_base = float(Decimal(self.xmin) - c_re_dec)
         delta_c_y_base = float(Decimal(self.ymin) - c_im_dec)
         step_x = float((Decimal(self.xmax) - Decimal(self.xmin)) / Decimal(self.width))
@@ -286,14 +303,14 @@ class calculos_mandelbrot:
 
         output = np.zeros((self.height, self.width), dtype=np.int32)
 
-        lib_pert.calcular_deltas_cpp.argtypes = [
-            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
-            np.ctypeslib.ndpointer(dtype=np.float64, ndim=1, flags='C_CONTIGUOUS'),
-            ctypes.c_double, ctypes.c_double,
-            ctypes.c_double, ctypes.c_double,
-            ctypes.c_int, ctypes.c_int, ctypes.c_int,
-            np.ctypeslib.ndpointer(dtype=np.int32, ndim=2, flags='C_CONTIGUOUS')
-        ]
+        # 10 ARGUMENTOS
+        lib_pert.calcular_deltas_cpp(
+            Z_ref_re, Z_ref_im,
+            delta_c_x_base, delta_c_y_base,
+            step_x, step_y,
+            self.width, self.height, self.max_iter,
+            output
+        )
 
         return output
     
