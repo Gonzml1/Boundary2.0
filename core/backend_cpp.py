@@ -61,7 +61,8 @@ mandelbrot_cpp = free_mandelbrot = None
 julia_cpp = free_julia = None
 burning_ship_cpp = free_burning_ship = None
 circulo_cpp = free_circulo = None
-calcular_orbita_referencia = calcular_deltas_cpp = None
+pert_crear = pert_largo = pert_liberar = pert_preparar_bla = pert_render = None
+pert_bytes_orbita = pert_bytes_bla = pert_exportar = None
 calcular_mandelbrot_gmp_puro = None
 
 # --- Instanciación de backends específicos ---
@@ -90,21 +91,29 @@ if _circulo:
 
 _perturbacion = cargar_backend('perturbacion.dll')
 if _perturbacion:
-    # (c_re, c_im, max_iter, bits_precision, Z_re[max_iter+1], Z_im[max_iter+1]) -> longitud de la órbita
-    calcular_orbita_referencia = _perturbacion.wrap_func(
-        'calcular_orbita_referencia',
-        [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int, _ARRAY_F64, _ARRAY_F64],
-        ctypes.c_int
+    # Ver codigos_cpp/perturbacion.cpp. Los números que pueden ser muy chicos (dc, pasos)
+    # viajan como (mantisa double, exponente int) para no perderlos por underflow.
+    _FE = [ctypes.c_double, ctypes.c_int]
+    pert_crear = _perturbacion.wrap_func(
+        'pert_crear', [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int], ctypes.c_void_p
     )
-    # (Z_re, Z_im, largo_orbita, dc_x_base, dc_y_base, step_x, step_y, width, height, max_iter, salida)
-    calcular_deltas_cpp = _perturbacion.wrap_func(
-        'calcular_deltas_cpp',
-        [_ARRAY_F64, _ARRAY_F64, ctypes.c_int,
-         ctypes.c_double, ctypes.c_double,
-         ctypes.c_double, ctypes.c_double,
-         ctypes.c_int, ctypes.c_int, ctypes.c_int,
-         _MATRIZ_I32],
-        None
+    pert_largo = _perturbacion.wrap_func('pert_largo', [ctypes.c_void_p], ctypes.c_int)
+    pert_liberar = _perturbacion.wrap_func('pert_liberar', [ctypes.c_void_p], None)
+    pert_preparar_bla = _perturbacion.wrap_func(
+        'pert_preparar_bla', [ctypes.c_void_p, ctypes.c_int, *_FE, ctypes.c_double], ctypes.c_int
+    )
+    pert_render = _perturbacion.wrap_func(
+        'pert_render',
+        [ctypes.c_void_p, *_FE, *_FE, *_FE, *_FE,
+         ctypes.c_int, ctypes.c_int, ctypes.c_int, _MATRIZ_I32],
+        ctypes.c_longlong
+    )
+    pert_bytes_orbita = _perturbacion.wrap_func('pert_bytes_orbita', [ctypes.c_void_p], ctypes.c_longlong)
+    pert_bytes_bla = _perturbacion.wrap_func('pert_bytes_bla', [ctypes.c_void_p], ctypes.c_longlong)
+    _BYTES = np.ctypeslib.ndpointer(dtype=np.uint8, ndim=1, flags='C_CONTIGUOUS')
+    _INTS = np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS')
+    pert_exportar = _perturbacion.wrap_func(
+        'pert_exportar', [ctypes.c_void_p, _BYTES, _BYTES, _INTS, _INTS], ctypes.c_int
     )
 
 _gmp_puro = cargar_backend('gmp_puro.dll')

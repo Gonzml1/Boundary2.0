@@ -1,9 +1,9 @@
+import math
 import time
 import logging
 import decimal
 from decimal import Decimal
 from functools import wraps
-from typing import NamedTuple
 
 import numpy as np
 
@@ -12,10 +12,10 @@ from .backend_cpp import BACKENDS_DISPONIBLES
 
 log = logging.getLogger(__name__)
 
-# Precisión de las coordenadas (dígitos decimales). 320 dígitos alcanzan para zooms
-# de hasta ~1e-290, que es el límite de los deltas en double de la perturbación.
+# Precisión de las coordenadas (dígitos decimales). Con floatexp la perturbación no tiene
+# límite propio de zoom, así que el límite lo pone esto: ~1100 dígitos alcanzan para ~1e-1050.
 # DefaultContext es la plantilla de los hilos nuevos (p. ej. el hilo del video).
-PRECISION_DECIMAL = 320
+PRECISION_DECIMAL = 1100
 decimal.DefaultContext.prec = PRECISION_DECIMAL
 decimal.getcontext().prec = PRECISION_DECIMAL
 
@@ -61,14 +61,61 @@ def _bits_necesarios(paso: Decimal) -> int:
     return max(128, int(digitos * 3.33) + 64)
 
 
-class OrbitaReferencia(NamedTuple):
-    Z_re: np.ndarray
-    Z_im: np.ndarray
-    largo: int
-    dc_x_base: float
-    dc_y_base: float
-    step_x: float
-    step_y: float
+# --- Perturbación ---
+# Tolerancia del BLA: un salto lineal se usa si el término que descarta es menor que
+# BLA_EPSILON veces el que conserva. Más chico = más exacto y más lento.
+BLA_EPSILON = 2.0 ** -40
+# Por debajo de este paso entre píxeles se usa floatexp en vez de double
+# (con margen: las normas |dz|^2 tienen que seguir entrando en un double).
+UMBRAL_FLOATEXP = Decimal('1e-140')
+
+
+def _a_floatexp(valor: Decimal) -> tuple[float, int]:
+    """Decimal -> (mantisa, exponente) con valor = mantisa * 2**exponente, sin underflow."""
+    if valor == 0:
+        return 0.0, 0
+    k = int(valor.copy_abs().adjusted() * 3.321928094887362)   # ~log2(|valor|)
+    mantisa, e = math.frexp(float(valor * Decimal(2) ** -k))
+    return mantisa, e + k
+
+
+class _OrbitaGMP:
+    """Órbita de referencia y tabla BLA, guardadas del lado de la DLL (perturbacion.cpp)."""
+
+    def __init__(self, c_re: Decimal, c_im: Decimal, max_iter: int, bits: int):
+        inicio = time.perf_counter()
+        self.h = cpp.pert_crear(format(c_re, 'f').encode('ascii'), format(c_im, 'f').encode('ascii'),
+                                max_iter, bits)
+        self.largo = cpp.pert_largo(self.h)
+        self.clave_bla = None
+        self.niveles = 0
+        self._gpu = None
+        log.debug("Órbita de referencia: %d iteraciones a %d bits (%.3f s)",
+                  self.largo - 1, bits, time.perf_counter() - inicio)
+
+    def preparar_bla(self, modo: int, dc_max: tuple[float, int], eps: float) -> None:
+        clave = (modo, dc_max, eps)
+        if clave == self.clave_bla:
+            return
+        self.niveles = cpp.pert_preparar_bla(self.h, modo, dc_max[0], dc_max[1], eps)
+        self.clave_bla = clave
+        self._gpu = None
+
+    def en_gpu(self):
+        """Copia a la GPU la órbita y la tabla del modo actual (una vez por tabla)."""
+        if self._gpu is None:
+            orbita = np.empty(cpp.pert_bytes_orbita(self.h), dtype=np.uint8)
+            tabla = np.empty(max(1, cpp.pert_bytes_bla(self.h)), dtype=np.uint8)
+            off = np.zeros(32, dtype=np.int32)
+            cnt = np.zeros(32, dtype=np.int32)
+            cpp.pert_exportar(self.h, orbita, tabla, off, cnt)
+            self._gpu = tuple(cp.asarray(x) for x in (orbita, tabla, off, cnt))
+        return self._gpu
+
+    def __del__(self):
+        if getattr(self, 'h', None) and cpp.pert_liberar:
+            cpp.pert_liberar(self.h)
+            self.h = None
 
 
 class ProcesadorColores:
@@ -232,71 +279,83 @@ class calculos_mandelbrot:
         return img
     
     # --- Perturbación ---
-    # La órbita de referencia Z se calcula en alta precisión (GMP) en el centro de la vista;
-    # cada píxel itera solo su diferencia dz en double. Ver codigos_cpp/perturbacion.cpp.
+    # La órbita de referencia Z se calcula con GMP en el centro de la vista y cada píxel itera
+    # solo su diferencia dz, salteando iteraciones con BLA. Ver codigos_cpp/perturbacion.cpp.
+    bla_epsilon = BLA_EPSILON        # 0 desactiva el BLA
+    modo_perturbacion = None         # None = automático, 0 = double, 1 = floatexp
 
-    def _preparar_perturbacion(self) -> OrbitaReferencia:
+    def _preparar_perturbacion(self):
         c_re = (self.xmin_dec + self.xmax_dec) / 2
         c_im = (self.ymin_dec + self.ymax_dec) / 2
         # Mismo muestreo que np.linspace(xmin, xmax, width) del resto de los backends
         step_x = (self.xmax_dec - self.xmin_dec) / max(1, self.width - 1)
         step_y = (self.ymax_dec - self.ymin_dec) / max(1, self.height - 1)
-        if abs(float(step_x)) < 1e-290:
-            log.warning("Zoom fuera del rango de double (paso %.3e): la imagen va a salir rota", float(step_x))
-        bits = _bits_necesarios(min(abs(step_x), abs(step_y)))
+        paso = min(abs(step_x), abs(step_y))
+        if paso and paso.adjusted() < -(PRECISION_DECIMAL - 40):
+            log.warning("Zoom más allá de la precisión de las coordenadas (paso %s)", f"{paso:.3e}")
+        bits = _bits_necesarios(paso)
 
         # La calidad progresiva (low/medium/high) renderiza 3 veces el mismo centro:
         # se reutiliza la órbita si no cambió nada que la afecte.
         clave = (c_re, c_im, self.max_iter, bits)
-        if self._cache_orbita is not None and self._cache_orbita[0] == clave:
-            Z_re, Z_im, largo = self._cache_orbita[1]
-        else:
-            Z_re = np.zeros(self.max_iter + 1, dtype=np.float64)
-            Z_im = np.zeros(self.max_iter + 1, dtype=np.float64)
-            largo = cpp.calcular_orbita_referencia(
-                format(c_re, 'f').encode('ascii'), format(c_im, 'f').encode('ascii'),
-                self.max_iter, bits, Z_re, Z_im
-            )
-            self._cache_orbita = (clave, (Z_re, Z_im, largo))
-            log.debug("Órbita de referencia: %d iteraciones a %d bits", largo - 1, bits)
+        if self._cache_orbita is None or self._cache_orbita[0] != clave:
+            self._cache_orbita = (clave, _OrbitaGMP(c_re, c_im, self.max_iter, bits))
+        orbita = self._cache_orbita[1]
 
-        return OrbitaReferencia(
-            Z_re, Z_im, largo,
-            float(self.xmin_dec - c_re), float(self.ymin_dec - c_im),
-            float(step_x), float(step_y)
-        )
+        modo = self.modo_perturbacion
+        if modo is None:
+            modo = 1 if paso < UMBRAL_FLOATEXP else 0
+
+        # Cota de |dc| en la imagen, redondeada hacia arriba a potencia de 2 para que la tabla
+        # BLA sirva para los tres niveles de calidad (una cota mayor solo la hace más conservadora).
+        dx = max(abs(self.xmin_dec - c_re), abs(self.xmax_dec - c_re))
+        dy = max(abs(self.ymin_dec - c_im), abs(self.ymax_dec - c_im))
+        _, e = _a_floatexp(dx + dy)
+        orbita.preparar_bla(modo, (0.5, e + 1), self.bla_epsilon)
+
+        dc = tuple(_a_floatexp(v) for v in (self.xmin_dec - c_re, self.ymin_dec - c_im, step_x, step_y))
+        return orbita, modo, dc
+
+    def _log_perturbacion(self, orbita, modo, pasos, output) -> None:
+        if log.isEnabledFor(logging.DEBUG):
+            iteraciones = int(output.sum(dtype=np.int64)) + output.size
+            log.debug("Perturbación %s: %d niveles BLA, %d pasos para %d iteraciones (x%.1f)",
+                      "floatexp" if modo else "double", orbita.niveles, pasos, iteraciones,
+                      iteraciones / max(1, pasos))
 
     @register_fractal("Mandelbrot", "perturbacion_cpu", requiere="perturbacion.dll")
     @medir_tiempo("Mandelbrot Perturbacion CPU")
     def hacer_mandelbrot_perturbacion_cpu(self) -> np.ndarray:
-        ref = self._preparar_perturbacion()
+        orbita, modo, dc = self._preparar_perturbacion()
         output = np.empty((self.height, self.width), dtype=np.int32)
-        cpp.calcular_deltas_cpp(
-            ref.Z_re, ref.Z_im, ref.largo,
-            ref.dc_x_base, ref.dc_y_base,
-            ref.step_x, ref.step_y,
-            self.width, self.height, self.max_iter,
-            output
+        pasos = cpp.pert_render(
+            orbita.h, *dc[0], *dc[1], *dc[2], *dc[3],
+            self.width, self.height, self.max_iter, output
         )
+        self._log_perturbacion(orbita, modo, pasos, output)
         return output
 
     @register_fractal("Mandelbrot", "perturbacion_gpu", requiere=("gpu", "perturbacion.dll"))
     @medir_tiempo("Mandelbrot Perturbacion GPU")
     def hacer_mandelbrot_perturbacion_gpu(self) -> np.ndarray:
-        ref = self._preparar_perturbacion()
-        Z_re = cp.asarray(ref.Z_re)
-        Z_im = cp.asarray(ref.Z_im)
+        orbita, modo, dc = self._preparar_perturbacion()
+        Z, tabla, off, cnt = orbita.en_gpu()
         output = cp.empty((self.height, self.width), dtype=cp.int32)
+        pasos = cp.zeros(1, dtype=cp.uint64)
+        argumentos_dc = []
+        for mantisa, exponente in dc:
+            argumentos_dc += [np.float64(mantisa), np.int32(exponente)]
         bloque = (16, 16)
         grilla = ((self.width + 15) // 16, (self.height + 15) // 16)
-        mandelbrot_perturbacion_kernel(grilla, bloque, (
-            Z_re, Z_im, np.int32(ref.largo),
-            np.float64(ref.dc_x_base), np.float64(ref.dc_y_base),
-            np.float64(ref.step_x), np.float64(ref.step_y),
+        kernel_perturbacion(modo)(grilla, bloque, (
+            Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
+            *argumentos_dc,
             np.int32(self.width), np.int32(self.height), np.int32(self.max_iter),
-            output
+            output, pasos
         ))
-        return output.get()
+        output = output.get()
+        self._log_perturbacion(orbita, modo, int(pasos.get()[0]), output)
+        return output
 
     @register_fractal("Mandelbrot", "gmp", requiere="gmp_puro.dll")
     @medir_tiempo("Gmp")

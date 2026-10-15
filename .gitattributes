@@ -1,0 +1,2 @@
+# Los scripts de bash tienen que quedar con LF aunque Git convierta a CRLF en Windows
+*.sh text eol=lf

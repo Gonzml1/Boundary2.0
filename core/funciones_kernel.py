@@ -1,3 +1,5 @@
+import os
+
 import cupy as cp
 
 # ---------------------------------------------------------
@@ -190,48 +192,52 @@ circulo_kernel = cp.ElementwiseKernel(
     name='circulo_kernel'
 )
 
-# Perturbación con "rebasing" (Zhuoran, 2021). Misma lógica que codigos_cpp/perturbacion.cpp:
-# cada píxel itera solo su delta dz respecto de la órbita de referencia Z (calculada con GMP).
-# Si |Z_m + dz| < |dz| o se termina la órbita, se "rebasa": dz = Z_m + dz y m vuelve a 0.
-# Eso elimina los glitches sin necesitar varias órbitas de referencia.
-mandelbrot_perturbacion_kernel = cp.RawKernel(r'''
-extern "C" __global__
-void mandelbrot_perturbacion(const double* Z_re, const double* Z_im, int largo_orbita,
-                             double dc_x_base, double dc_y_base,
-                             double step_x, double step_y,
-                             int width, int height, int max_iter, int* output) {
+# Perturbación (rebasing + BLA + floatexp). La lógica está en codigos_cpp/perturbacion_core.h,
+# compartida con la DLL de CPU: acá solo se envuelve en dos kernels, uno por tipo numérico.
+# La órbita de referencia y la tabla BLA se arman en la DLL y se copian a la GPU.
+_RUTA_HEADER_PERTURBACION = os.path.join(
+    os.path.dirname(__file__), os.pardir, 'codigos_cpp', 'perturbacion_core.h'
+)
+_KERNELS_PERTURBACION = r"""
+template<class C, class R>
+__device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabla,
+                                    const int* off, const int* cnt, int niveles,
+                                    double bx_m, int bx_e, double by_m, int by_e,
+                                    double sx_m, int sx_e, double sy_m, int sy_e,
+                                    int width, int height, int max_iter,
+                                    int* output, unsigned long long* pasos) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
-
-    double dc_re = dc_x_base + x * step_x;
-    double dc_im = dc_y_base + y * step_y;
-    double dz_re = 0.0, dz_im = 0.0;
-    int m = 0;
-    int n = 0;
-    for (; n < max_iter; ++n) {
-        // dz' = (2 Z_m + dz) dz + dc
-        double a_re = 2.0 * Z_re[m] + dz_re;
-        double a_im = 2.0 * Z_im[m] + dz_im;
-        double t = a_re * dz_re - a_im * dz_im + dc_re;
-        dz_im = a_re * dz_im + a_im * dz_re + dc_im;
-        dz_re = t;
-        ++m;
-
-        double z_re = Z_re[m] + dz_re;
-        double z_im = Z_im[m] + dz_im;
-        double z2 = z_re * z_re + z_im * z_im;
-        if (z2 > 4.0) break;
-
-        if (z2 < dz_re * dz_re + dz_im * dz_im || m == largo_orbita - 1) {
-            dz_re = z_re;
-            dz_im = z_im;
-            m = 0;
-        }
-    }
-    output[y * width + x] = n;
+    FE dc_re = fe_normalizar(bx_m, bx_e) + fe_normalizar(sx_m, sx_e) * fe((double)x);
+    FE dc_im = fe_normalizar(by_m, by_e) + fe_normalizar(sy_m, sy_e) * fe((double)y);
+    long long p = 0;
+    output[y * width + x] = iterar_pixel<C, R>(Z, largo, tabla, off, cnt, niveles,
+                                                complejo_fe<C>(dc_re, dc_im), max_iter, &p);
+    atomicAdd(pasos, (unsigned long long)p);
 }
-''', 'mandelbrot_perturbacion')
+
+#define ARGS(C, R) const C* Z, int largo, const Bla<C, R>* tabla, const int* off, const int* cnt, \
+    int niveles, double bx_m, int bx_e, double by_m, int by_e, double sx_m, int sx_e, \
+    double sy_m, int sy_e, int width, int height, int max_iter, int* output, unsigned long long* pasos
+#define PASAR Z, largo, tabla, off, cnt, niveles, bx_m, bx_e, by_m, by_e, sx_m, sx_e, sy_m, sy_e, \
+    width, height, max_iter, output, pasos
+
+extern "C" __global__ void perturbacion_double(ARGS(CD, double))  { render_perturbacion<CD, double>(PASAR); }
+extern "C" __global__ void perturbacion_floatexp(ARGS(CFE, FE))   { render_perturbacion<CFE, FE>(PASAR); }
+"""
+
+_modulo_perturbacion = None
+
+def kernel_perturbacion(modo: int):
+    """Devuelve el kernel para el modo (0 = double, 1 = floatexp). Se compila la primera vez."""
+    global _modulo_perturbacion
+    if _modulo_perturbacion is None:
+        with open(_RUTA_HEADER_PERTURBACION, encoding='utf-8') as f:
+            header = f.read()
+        _modulo_perturbacion = cp.RawModule(code=header + _KERNELS_PERTURBACION)
+    nombre = 'perturbacion_double' if modo == 0 else 'perturbacion_floatexp'
+    return _modulo_perturbacion.get_function(nombre)
 
 mandelbrot_espiral_kernel = cp.ElementwiseKernel(
     in_params='complex128 c, int32 max_iter',
