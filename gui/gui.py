@@ -107,7 +107,8 @@ class WorkerVideo(QThread):
             pedido = replace(p, xmin=cuadro.xmin, xmax=cuadro.xmax, ymin=cuadro.ymin, ymax=cuadro.ymax,
                              max_iter=cuadro.max_iter)
             imagen = renderizar(motor, pedido)
-            _guardar_png(os.path.join(self.carpeta, f"frame_{i:05d}.png"), imagen.rgb)
+            # frame_1.png, frame_2.png, ... (sin ceros adelante, empezando en 1)
+            _guardar_png(os.path.join(self.carpeta, f"frame_{i + 1}.png"), imagen.rgb)
             self.progreso.emit(i + 1, self.cuadros)
 
         mp4 = armar_mp4(self.carpeta, self.fps)

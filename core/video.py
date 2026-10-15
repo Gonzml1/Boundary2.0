@@ -74,14 +74,14 @@ def crear_carpeta_video(base: str) -> str:
 
 
 def armar_mp4(carpeta: str, fps: int, nombre: str = "zoom.mp4") -> str | None:
-    """Une los frame_XXXXX.png en un mp4 con ffmpeg, si está instalado. Devuelve la ruta o None."""
+    """Une los frame_1.png, frame_2.png... en un mp4 con ffmpeg, si está instalado. Devuelve la ruta o None."""
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         log.warning("ffmpeg no está instalado: quedan solo los PNG en %s", carpeta)
         return None
     salida = os.path.join(carpeta, nombre)
-    comando = [ffmpeg, "-y", "-loglevel", "error", "-framerate", str(fps),
-               "-i", os.path.join(carpeta, "frame_%05d.png"),
+    comando = [ffmpeg, "-y", "-loglevel", "error", "-framerate", str(fps), "-start_number", "1",
+               "-i", os.path.join(carpeta, "frame_%d.png"),
                "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
                # libx264 + yuv420p necesita ancho y alto pares
                "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2", salida]
