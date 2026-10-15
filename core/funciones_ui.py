@@ -1,8 +1,10 @@
 from gui.MandelbrotGUI import Ui_Boundary
 from PyQt5 import QtWidgets
 from core.modulo_opengl import MandelbrotWidget
-from decimal import Decimal, getcontext
-getcontext().prec = 100
+import logging
+from decimal import Decimal
+
+log = logging.getLogger(__name__)
 
 def mostrar_fractal_opengl(ui):
     try:
@@ -29,10 +31,9 @@ def mostrar_fractal_opengl(ui):
                 
         layout.addWidget(mandelbrot_widget)
         return mandelbrot_widget
-    except Exception as e:
-        # Imprimimos el error real en consola para no fallar en silencio
-        print(f"Error crítico al cargar OpenGL: {e}")
-        raise e
+    except Exception:
+        log.exception("Error crítico al cargar OpenGL")
+        raise
 
 def obtener_datos(ui):
     xmin          =   Decimal(ui.xmin_entrada.text())
@@ -41,8 +42,8 @@ def obtener_datos(ui):
     ymax          =   Decimal(ui.ymax_entrada.text())
     zoom_out      =   Decimal(ui.zoom_out_factor_entrada.text())
     zoom_in       =   Decimal(ui.zoom_in_factor_entrada.text())
-    real          =   Decimal(0.1)
-    imag          =   Decimal(0.1)
+    real          =   Decimal('0.1')
+    imag          =   Decimal('0.1')
     cmap          =   str(ui.cmap_comboBox.currentText())
     width         =   int(ui.width_entrada.text())
     height        =   int(ui.high_entrada.text())

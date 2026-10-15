@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 from PyQt5.QtWidgets import QOpenGLWidget
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
@@ -6,11 +8,14 @@ from core.modulo_de_calculo_fractales import calculos_mandelbrot
 from core.paletas import PALETTE_REGISTRY
 from decimal import Decimal
 
+log = logging.getLogger(__name__)
+
 
 class MandelbrotWidget(QOpenGLWidget):
     # --- SEÑALES MVC ---
     coordenadas_raton_cambiadas = pyqtSignal(float, float)
-    limites_zoom_cambiados = pyqtSignal(float, float, float, float)
+    # Los límites viajan como texto para no perder precisión en zooms profundos
+    limites_zoom_cambiados = pyqtSignal(str, str, str, str)
     parametros_matematicos_cambiados = pyqtSignal(int, int)
 
     def __init__(self, cmap, xmin, xmax, ymin, ymax, width, height, max_iter,
@@ -156,8 +161,19 @@ class MandelbrotWidget(QOpenGLWidget):
         alto_corregido = ancho_actual / aspect_ratio
         self.ymin = centro_y - alto_corregido / Decimal('2')
         self.ymax = centro_y + alto_corregido / Decimal('2')
-        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
-                                         float(self.ymin), float(self.ymax))
+        self._emitir_limites()
+
+    def _emitir_limites(self):
+        self.limites_zoom_cambiados.emit(*self.limites_como_texto())
+
+    def limites_como_texto(self) -> tuple[str, str, str, str]:
+        # 20 dígitos más allá del tamaño de la vista: suficiente para no perder nada al releerlos
+        span = min(abs(self.xmax - self.xmin), abs(self.ymax - self.ymin))
+        decimales = max(0, 20 - span.adjusted()) if span else 20
+        def formatear(valor: Decimal) -> str:
+            texto = format(valor, f'.{decimales}f')
+            return texto.rstrip('0').rstrip('.') if '.' in texto else texto
+        return tuple(formatear(v) for v in (self.xmin, self.xmax, self.ymin, self.ymax))
 
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
@@ -174,20 +190,19 @@ class MandelbrotWidget(QOpenGLWidget):
         render_w = max(1, int(self.width / factor))
         render_h = max(1, int(self.height / factor))
 
-        f_xmin, f_xmax = float(self.xmin), float(self.xmax)
-        f_ymin, f_ymax = float(self.ymin), float(self.ymax)
-        f_real, f_imag = float(self.real), float(self.imag)
-
+        # Se pasan los Decimal tal cual: el motor guarda la versión float para los backends
+        # comunes y la de alta precisión para perturbación/GMP.
         self.mandelbrot.actualizar_fractal(
-            f_xmin, f_xmax, f_ymin, f_ymax,
+            self.xmin, self.xmax, self.ymin, self.ymax,
             render_w, render_h, self.max_iter,
-            self.tipo_calculo, self.tipo_fractal, f_real, f_imag
+            self.tipo_calculo, self.tipo_fractal, self.real, self.imag
         )
 
         try:
             data = self.mandelbrot.calcular_fractal()
-        except RuntimeError as e:
-            print(e)
+        except Exception:
+            # Una excepción sin atrapar dentro de paintGL cierra la app entera (PyQt5)
+            log.exception("Fallo calculando '%s / %s'", self.tipo_fractal, self.tipo_calculo)
             glClearColor(1.0, 0.0, 0.0, 1.0)
             glClear(GL_COLOR_BUFFER_BIT)
             return
@@ -240,8 +255,7 @@ class MandelbrotWidget(QOpenGLWidget):
             self.ymin += dy
             self.ymax += dy
             self.last_pos = event.pos()
-            self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
-                                             float(self.ymin), float(self.ymax))
+            self._emitir_limites()
             self.interaccion_rapida()
     def _aplicar_zoom(self, factor):
         factor_dec = Decimal(str(factor))
@@ -250,8 +264,7 @@ class MandelbrotWidget(QOpenGLWidget):
         dy = (self.ymax - self.ymin) * factor_dec / Decimal('2')
         self.xmin, self.xmax = c_x - dx, c_x + dx
         self.ymin, self.ymax = c_y - dy, c_y + dy
-        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
-                                         float(self.ymin), float(self.ymax))
+        self._emitir_limites()
         self.interaccion_rapida()
 
     def _centrar_y_zoom(self, px, py, factor):
@@ -264,8 +277,7 @@ class MandelbrotWidget(QOpenGLWidget):
         self.xmax = c_x + (self.xmax - c_x) * factor_dec
         self.ymin = c_y - (c_y - self.ymin) * factor_dec
         self.ymax = c_y + (self.ymax - c_y) * factor_dec
-        self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
-                                         float(self.ymin), float(self.ymax))
+        self._emitir_limites()
         self.interaccion_rapida()
 
     def keyPressEvent(self, event):
@@ -311,7 +323,6 @@ class MandelbrotWidget(QOpenGLWidget):
 
         if event.key() in (Qt.Key_Left, Qt.Key_A, Qt.Key_Right, Qt.Key_D,
                            Qt.Key_Up, Qt.Key_W, Qt.Key_Down, Qt.Key_S):
-            self.limites_zoom_cambiados.emit(float(self.xmin), float(self.xmax),
-                                             float(self.ymin), float(self.ymax))
+            self._emitir_limites()
 
         self.interaccion_rapida()

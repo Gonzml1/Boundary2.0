@@ -1,5 +1,9 @@
 import cupy as cp
 
+# ---------------------------------------------------------
+# Kernels Originales (Devuelven int32 - iteraciones secas)
+# ---------------------------------------------------------
+
 mandelbrot_kernel = cp.ElementwiseKernel(
     in_params='complex128 c, int32 max_iter',
     out_params='int32 result',
@@ -42,7 +46,6 @@ mandelbrot_kernel_optimizado = cp.ElementwiseKernel(
             x2 = x * x;
             y2 = y * y;
             
-            // Verificación de escape
             if (x2 + y2 > 4.0) {
                 result = i;
                 return;
@@ -52,6 +55,83 @@ mandelbrot_kernel_optimizado = cp.ElementwiseKernel(
    """,
     name='mandelbrot_kernel_opt'
 )
+
+# ---------------------------------------------------------
+# Nuevos Kernels para Coloración Avanzada (Devuelven float64)
+# ---------------------------------------------------------
+
+mandelbrot_smooth_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        // Se usa un radio de escape mayor (100.0) para evitar errores de precisión en el logaritmo
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            double z2 = real(z)*real(z) + imag(z)*imag(z);
+            if (z2 > 100.0) {
+                double log_z = log(z2) / 2.0;
+                double nu = log2(log_z);
+                result = (double)i + 1.0 - nu;
+                return;
+            }
+        }
+        result = (double)max_iter;
+    """,
+    name='mandelbrot_smooth_kernel'
+)
+
+mandelbrot_orbit_trap_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        double min_dist = 1e20; // Inicializar con un valor muy grande
+        
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            double current_dist = real(z)*real(z) + imag(z)*imag(z); // Distancia al origen
+            if (current_dist < min_dist) {
+                min_dist = current_dist;
+            }
+            if (current_dist > 4.0) {
+                result = min_dist; // Mapear color basado en la distancia mínima
+                return;
+            }
+        }
+        result = min_dist;
+    """,
+    name='mandelbrot_orbit_trap_kernel'
+)
+
+mandelbrot_distance_estimator_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        complex<double> dz = 0.0; // Derivada
+        
+        for (int i = 0; i < max_iter; ++i) {
+            dz = 2.0 * z * dz + 1.0; // Regla de la cadena: dz' = 2*z*dz + dc (donde dc = 1)
+            z = z*z + c;
+            
+            double z2 = real(z)*real(z) + imag(z)*imag(z);
+            if (z2 > 100.0) {
+                double mod_z = sqrt(z2);
+                double mod_dz = sqrt(real(dz)*real(dz) + imag(dz)*imag(dz));
+                // Fórmula del estimador de distancia continua
+                result = log(z2) * mod_z / mod_dz;
+                return;
+            }
+        }
+        result = 0.0; // Interior del fractal
+    """,
+    name='mandelbrot_distance_estimator_kernel'
+)
+
+# ---------------------------------------------------------
+# Otros Fractales
+# ---------------------------------------------------------
 
 julia_kernel = cp.ElementwiseKernel(
     in_params='complex128 z, complex128 c, int32 max_iter',
@@ -96,7 +176,6 @@ circulo_kernel = cp.ElementwiseKernel(
     operation="""
         complex<double> z_temp = z;
         for (int i = 0; i < max_iter; ++i) {
-            // z = exp((z^2 - 1.00001*z) / c^4)
             complex<double> z2 = z_temp * z_temp;
             complex<double> numerator = z2 - 1.00001 * z_temp;
             complex<double> c4 = c * c * c * c;
@@ -111,53 +190,227 @@ circulo_kernel = cp.ElementwiseKernel(
     name='circulo_kernel'
 )
 
-
+# Perturbación con "rebasing" (Zhuoran, 2021). Misma lógica que codigos_cpp/perturbacion.cpp:
+# cada píxel itera solo su delta dz respecto de la órbita de referencia Z (calculada con GMP).
+# Si |Z_m + dz| < |dz| o se termina la órbita, se "rebasa": dz = Z_m + dz y m vuelve a 0.
+# Eso elimina los glitches sin necesitar varias órbitas de referencia.
 mandelbrot_perturbacion_kernel = cp.RawKernel(r'''
 extern "C" __global__
-void mandelbrot_perturbacion(const double* Z_ref_re, const double* Z_ref_im, 
-                             double delta_c_x_base, double delta_c_y_base, 
-                             double step_x, double step_y, 
-                             float* output, int max_iter, int width, int height) {
-                             
+void mandelbrot_perturbacion(const double* Z_re, const double* Z_im, int largo_orbita,
+                             double dc_x_base, double dc_y_base,
+                             double step_x, double step_y,
+                             int width, int height, int max_iter, int* output) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
-    
     if (x >= width || y >= height) return;
-    int idx = y * width + x;
-    
-    double dc_re = delta_c_x_base + x * step_x;
-    double dc_im = delta_c_y_base + y * step_y;
-    
-    double dz_re = 0.0;
-    double dz_im = 0.0;
-    
-    int n;
-    for (n = 0; n < max_iter; n++) {
-        double z_re = Z_ref_re[n];
-        double z_im = Z_ref_im[n];
-        
-        double z_dz_re = z_re * dz_re - z_im * dz_im;
-        double z_dz_im = z_re * dz_im + z_im * dz_re;
-        
-        double dz2_re = dz_re * dz_re - dz_im * dz_im;
-        double dz2_im = 2.0 * dz_re * dz_im;
-        
-        dz_re = 2.0 * z_dz_re + dz2_re + dc_re;
-        dz_im = 2.0 * z_dz_im + dz2_im + dc_im;
-        
-        double z_tot_re = z_re + dz_re;
-        double z_tot_im = z_im + dz_im;
-        
-        double z2 = z_tot_re * z_tot_re + z_tot_im * z_tot_im;
-        
-        // Aumentamos el radio de escape a 100 para que el suavizado sea matemáticamente preciso
-        if (z2 > 100.0) {
-            float log_z = logf((float)z2) / 2.0f;
-            float nu = log2f(log_z);
-            output[idx] = (float)n + 1.0f - nu;
-            return;
+
+    double dc_re = dc_x_base + x * step_x;
+    double dc_im = dc_y_base + y * step_y;
+    double dz_re = 0.0, dz_im = 0.0;
+    int m = 0;
+    int n = 0;
+    for (; n < max_iter; ++n) {
+        // dz' = (2 Z_m + dz) dz + dc
+        double a_re = 2.0 * Z_re[m] + dz_re;
+        double a_im = 2.0 * Z_im[m] + dz_im;
+        double t = a_re * dz_re - a_im * dz_im + dc_re;
+        dz_im = a_re * dz_im + a_im * dz_re + dc_im;
+        dz_re = t;
+        ++m;
+
+        double z_re = Z_re[m] + dz_re;
+        double z_im = Z_im[m] + dz_im;
+        double z2 = z_re * z_re + z_im * z_im;
+        if (z2 > 4.0) break;
+
+        if (z2 < dz_re * dz_re + dz_im * dz_im || m == largo_orbita - 1) {
+            dz_re = z_re;
+            dz_im = z_im;
+            m = 0;
         }
     }
-    output[idx] = (float)max_iter;
+    output[y * width + x] = n;
 }
 ''', 'mandelbrot_perturbacion')
+
+mandelbrot_espiral_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        double suma_espiral = 0.0;
+        double frecuencia = 3.0; // Cambia este valor para más o menos brazos en la espiral
+        
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            
+            // atan2 obtiene el ángulo (fase) del número complejo
+            double angulo = atan2(imag(z), real(z));
+            
+            // Acumular la onda trigonométrica
+            suma_espiral += sin(frecuencia * angulo);
+            
+            if (real(z)*real(z) + imag(z)*imag(z) > 100.0) {
+                // Promediar la suma respecto a las iteraciones para suavizar
+                result = suma_espiral / (double)(i + 1);
+                return;
+            }
+        }
+        result = suma_espiral / (double)max_iter;
+    """,
+    name='mandelbrot_espiral_kernel'
+)
+
+mandelbrot_triangulo_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        complex<double> z_prev = 0.0;
+        double suma_triangulo = 0.0;
+        
+        for (int i = 0; i < max_iter; ++i) {
+            z_prev = z;
+            z = z*z + c;
+            
+            double mod_z = sqrt(real(z)*real(z) + imag(z)*imag(z));
+            double mod_z_prev = sqrt(real(z_prev)*real(z_prev) + imag(z_prev)*imag(z_prev));
+            
+            complex<double> diff = z - z_prev;
+            double mod_diff = sqrt(real(diff)*real(diff) + imag(diff)*imag(diff));
+            
+            // Promedio de la desigualdad del triángulo
+            if (mod_z + mod_z_prev > 0.0) {
+                suma_triangulo += mod_diff / (mod_z + mod_z_prev);
+            }
+            
+            if (mod_z > 10.0) {
+                result = suma_triangulo / (double)(i + 1);
+                return;
+            }
+        }
+        result = suma_triangulo / (double)max_iter;
+    """,
+    name='mandelbrot_triangulo_kernel'
+)
+
+mandelbrot_gauss_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        double suma_gauss = 0.0;
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            double z2 = real(z)*real(z) + imag(z)*imag(z);
+            suma_gauss += exp(-z2);
+            if (z2 > 100.0) {
+                result = suma_gauss;
+                return;
+            }
+        }
+        result = suma_gauss;
+    """,
+    name='mandelbrot_gauss_kernel'
+)
+
+mandelbrot_lyapunov_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        double lyapunov = 0.0;
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            double mod_z = sqrt(real(z)*real(z) + imag(z)*imag(z));
+            if (mod_z > 0.0) {
+                lyapunov += log(2.0 * mod_z);
+            }
+            if (mod_z * mod_z > 100.0) {
+                result = lyapunov / (double)(i + 1);
+                return;
+            }
+        }
+        result = lyapunov / (double)max_iter;
+    """,
+    name='mandelbrot_lyapunov_kernel'
+)
+
+
+mandelbrot_curvatura_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        complex<double> z_prev = 1.0; 
+        double suma_angulo = 0.0;
+        for (int i = 0; i < max_iter; ++i) {
+            z_prev = z;
+            z = z*z + c;
+            
+            double mag_prev = real(z_prev)*real(z_prev) + imag(z_prev)*imag(z_prev);
+            if (mag_prev > 0.0001) {
+                // Angulo de z / z_prev
+                double r_z = real(z), i_z = imag(z);
+                double r_p = real(z_prev), i_p = -imag(z_prev); // Conjugado
+                double cross_r = r_z * r_p - i_z * i_p;
+                double cross_i = r_z * i_p + i_z * r_p;
+                suma_angulo += fabs(atan2(cross_i, cross_r));
+            }
+            
+            if (real(z)*real(z) + imag(z)*imag(z) > 100.0) {
+                result = suma_angulo / (double)(i + 1);
+                return;
+            }
+        }
+        result = suma_angulo / (double)max_iter;
+    """,
+    name='mandelbrot_curvatura_kernel'
+)
+
+mandelbrot_ejes_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        double min_dist = 1e20;
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            double dist_x = fabs(real(z));
+            double dist_y = fabs(imag(z));
+            double dist = (dist_x < dist_y) ? dist_x : dist_y;
+            
+            if (dist < min_dist) min_dist = dist;
+            
+            if (real(z)*real(z) + imag(z)*imag(z) > 100.0) {
+                result = min_dist;
+                return;
+            }
+        }
+        result = min_dist;
+    """,
+    name='mandelbrot_ejes_kernel'
+)
+
+
+mandelbrot_tablero_kernel = cp.ElementwiseKernel(
+    in_params='complex128 c, int32 max_iter',
+    out_params='float64 result',
+    operation="""
+        complex<double> z = 0.0;
+        double suma_tablero = 0.0;
+        double frecuencia = 5.0;
+        for (int i = 0; i < max_iter; ++i) {
+            z = z*z + c;
+            
+            suma_tablero += sin(real(z) * frecuencia) * sin(imag(z) * frecuencia);
+            
+            if (real(z)*real(z) + imag(z)*imag(z) > 100.0) {
+                result = suma_tablero / (double)(i + 1);
+                return;
+            }
+        }
+        result = suma_tablero / (double)max_iter;
+    """,
+    name='mandelbrot_tablero_kernel'
+)

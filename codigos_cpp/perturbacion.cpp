@@ -1,125 +1,113 @@
+// Mandelbrot por teoría de perturbaciones con "rebasing".
+//
+// Idea: para un píxel c = C + dc, con C el centro de la vista, escribimos z_n = Z_n + dz_n,
+// donde Z_n es la órbita de C (la "referencia"). Restando las dos recurrencias:
+//
+//     dz_{n+1} = (2 Z_n + dz_n) dz_n + dc
+//
+// Z se calcula UNA vez en alta precisión (GMP) y se guarda en double, porque |Z| <= 2.
+// dz y dc son números chiquitos que el double representa bien aunque el zoom sea 1e-200,
+// así que cada píxel itera en double, rápido y en paralelo.
+//
+// El problema clásico son los "glitches": cuando z_n pasa cerca de 0, dz deja de ser chico
+// frente a Z y el double pierde precisión. El rebasing (Zhuoran, 2021) lo arregla así:
+// si |Z_m + dz| < |dz|, o se termina la órbita de referencia, se reinicia la referencia
+// (dz = Z_m + dz, m = 0). Como Z_0 = 0, eso equivale a seguir desde el valor real de z.
+// Con una sola órbita de referencia y sin detección de glitches la imagen sale correcta.
+
 #include <gmp.h>
-#include <stdlib.h>
 #include <omp.h>
 
-extern "C" {
-    __declspec(dllexport) int calcular_orbita_referencia(
-        const char* c_re_str, const char* c_im_str, 
-        int max_iter, double* out_re, double* out_im) 
-    {
-        mpf_t c_re, c_im, z_re, z_im, z_re2, z_im2, temp;
-        mpf_init2(c_re, 300); 
-        mpf_init2(c_im, 300);
-        mpf_init2(z_re, 300); mpf_init2(z_im, 300);
-        mpf_init2(z_re2, 300); mpf_init2(z_im2, 300); mpf_init2(temp, 300);
+#define EXPORT extern "C" __declspec(dllexport)
 
-        mpf_t old_z_re, old_z_im, diff_re, diff_im, eps;
-        mpf_init2(old_z_re, 300); mpf_init2(old_z_im, 300);
-        mpf_init2(diff_re, 300); mpf_init2(diff_im, 300);
-        mpf_init2(eps, 300);
-        
-        mpf_set_str(eps, "1e-25", 10);
+// Calcula Z_0 = 0, Z_{n+1} = Z_n^2 + C con `prec_bits` bits de precisión.
+// out_re/out_im deben tener lugar para max_iter + 1 valores.
+// Devuelve el largo L de la órbita (Z_0 .. Z_{L-1}); corta cuando Z escapa (|Z| > 2).
+EXPORT int calcular_orbita_referencia(
+    const char* c_re_str, const char* c_im_str,
+    int max_iter, int prec_bits,
+    double* out_re, double* out_im)
+{
+    mpf_t c_re, c_im, z_re, z_im, z_re2, z_im2;
+    mpf_init2(c_re, prec_bits);  mpf_init2(c_im, prec_bits);
+    mpf_init2(z_re, prec_bits);  mpf_init2(z_im, prec_bits);
+    mpf_init2(z_re2, prec_bits); mpf_init2(z_im2, prec_bits);
 
-        mpf_set_str(c_re, c_re_str, 10);
-        mpf_set_str(c_im, c_im_str, 10);
-        mpf_set_d(z_re, 0.0);
-        mpf_set_d(z_im, 0.0);
+    mpf_set_str(c_re, c_re_str, 10);
+    mpf_set_str(c_im, c_im_str, 10);
+    mpf_set_ui(z_re, 0);
+    mpf_set_ui(z_im, 0);
+    out_re[0] = 0.0;
+    out_im[0] = 0.0;
 
-        int period_check_interval = 1;
-        int steps_to_check = 1;
-        int iter_alcanzadas = max_iter;
+    int largo = max_iter + 1;
+    for (int n = 1; n <= max_iter; ++n) {
+        mpf_mul(z_re2, z_re, z_re);
+        mpf_mul(z_im2, z_im, z_im);
 
-        for (int i = 0; i < max_iter; i++) {
-            out_re[i] = mpf_get_d(z_re);
-            out_im[i] = mpf_get_d(z_im);
+        // z_im = 2 z_re z_im + c_im
+        mpf_mul(z_im, z_im, z_re);
+        mpf_mul_2exp(z_im, z_im, 1);
+        mpf_add(z_im, z_im, c_im);
 
-            mpf_mul(z_re2, z_re, z_re);
-            mpf_mul(z_im2, z_im, z_im);
-            
-            mpf_add(temp, z_re2, z_im2);
-            if (mpf_cmp_d(temp, 4.0) > 0) {
-                iter_alcanzadas = i;
-                for (int j = i + 1; j < max_iter; j++) {
-                    out_re[j] = out_re[i];
-                    out_im[j] = out_im[i];
-                }
-                break;
-            }
+        // z_re = z_re^2 - z_im^2 + c_re
+        mpf_sub(z_re, z_re2, z_im2);
+        mpf_add(z_re, z_re, c_re);
 
-            if (i > 0) {
-                mpf_sub(diff_re, z_re, old_z_re);
-                mpf_abs(diff_re, diff_re);
-                mpf_sub(diff_im, z_im, old_z_im);
-                mpf_abs(diff_im, diff_im);
-
-                if (mpf_cmp(diff_re, eps) < 0 && mpf_cmp(diff_im, eps) < 0) {
-                    for (int j = i + 1; j < max_iter; j++) {
-                        out_re[j] = out_re[i];
-                        out_im[j] = out_im[i];
-                    }
-                    break;
-                }
-            }
-
-            if (steps_to_check == i) {
-                mpf_set(old_z_re, z_re);
-                mpf_set(old_z_im, z_im);
-                period_check_interval *= 2;
-                steps_to_check += period_check_interval;
-            }
-
-            mpf_mul(z_im, z_im, z_re);
-            mpf_mul_ui(z_im, z_im, 2);
-            mpf_add(z_im, z_im, c_im);
-
-            mpf_sub(z_re, z_re2, z_im2);
-            mpf_add(z_re, z_re, c_re);
+        out_re[n] = mpf_get_d(z_re);
+        out_im[n] = mpf_get_d(z_im);
+        if (out_re[n] * out_re[n] + out_im[n] * out_im[n] > 4.0) {
+            largo = n + 1;
+            break;
         }
-
-        mpf_clears(c_re, c_im, z_re, z_im, z_re2, z_im2, temp, NULL);
-        mpf_clears(old_z_re, old_z_im, diff_re, diff_im, eps, NULL);
-        
-        return iter_alcanzadas;
     }
 
-    __declspec(dllexport) void calcular_deltas_cpp(
-        const double* Z_ref_re, const double* Z_ref_im,
-        double dc_x_base, double dc_y_base,
-        double step_x, double step_y,
-        int width, int height, int max_iter,
-        int* output) 
-    {
-        #pragma omp parallel for collapse(2)
-        for (int j = 0; j < height; ++j) {
-            for (int i = 0; i < width; ++i) {
-                double dc_re = dc_x_base + i * step_x;
-                double dc_im = dc_y_base + j * step_y;
+    mpf_clears(c_re, c_im, z_re, z_im, z_re2, z_im2, NULL);
+    return largo;
+}
 
-                double dz_re = 0.0;
-                double dz_im = 0.0;
+// Itera cada píxel como delta respecto de la órbita de referencia.
+// El píxel (i, j) tiene dc = (dc_x_base + i * step_x, dc_y_base + j * step_y).
+// output[j * width + i] = iteración de escape (max_iter si no escapa), igual que el resto de los backends.
+EXPORT void calcular_deltas_cpp(
+    const double* Z_re, const double* Z_im, int largo_orbita,
+    double dc_x_base, double dc_y_base,
+    double step_x, double step_y,
+    int width, int height, int max_iter,
+    int* output)
+{
+    // dynamic: las filas que tocan el interior del conjunto tardan mucho más que las otras
+    #pragma omp parallel for schedule(dynamic, 1)
+    for (int j = 0; j < height; ++j) {
+        const double dc_im = dc_y_base + j * step_y;
+        for (int i = 0; i < width; ++i) {
+            const double dc_re = dc_x_base + i * step_x;
 
-                int n = 0;
-                while (n < max_iter) {
-                    double z_ref_re = Z_ref_re[n];
-                    double z_ref_im = Z_ref_im[n];
+            double dz_re = 0.0, dz_im = 0.0;
+            int m = 0;  // posición en la órbita de referencia
+            int n = 0;  // iteración real del píxel
+            for (; n < max_iter; ++n) {
+                // dz = (2 Z_m + dz) dz + dc
+                const double a_re = 2.0 * Z_re[m] + dz_re;
+                const double a_im = 2.0 * Z_im[m] + dz_im;
+                const double t = a_re * dz_re - a_im * dz_im + dc_re;
+                dz_im = a_re * dz_im + a_im * dz_re + dc_im;
+                dz_re = t;
+                ++m;
 
-                    double z_tot_re = z_ref_re + dz_re;
-                    double z_tot_im = z_ref_im + dz_im;
+                const double z_re = Z_re[m] + dz_re;
+                const double z_im = Z_im[m] + dz_im;
+                const double z2 = z_re * z_re + z_im * z_im;
+                if (z2 > 4.0) break;
 
-                    if (z_tot_re * z_tot_re + z_tot_im * z_tot_im > 4.0) break;
-
-                    double dz_re_sq = dz_re * dz_re - dz_im * dz_im;
-                    double dz_im_sq = 2.0 * dz_re * dz_im;
-
-                    double dz_new_re = 2.0 * (z_ref_re * dz_re - z_ref_im * dz_im) + dz_re_sq + dc_re;
-                    double dz_new_im = 2.0 * (z_ref_re * dz_im + z_ref_im * dz_re) + dz_im_sq + dc_im;
-
-                    dz_re = dz_new_re;
-                    dz_im = dz_new_im;
-                    n++;
+                // Rebasing
+                if (z2 < dz_re * dz_re + dz_im * dz_im || m == largo_orbita - 1) {
+                    dz_re = z_re;
+                    dz_im = z_im;
+                    m = 0;
                 }
-                output[j * width + i] = n;
             }
+            output[j * width + i] = n;
         }
     }
 }

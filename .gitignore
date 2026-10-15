@@ -3,6 +3,8 @@ __pycache__/
 venv/
 env/
 .env
+
+# Artefactos de compilación (se generan con build_dlls.sh)
 *.dll
 *.exe
 *.a

@@ -1,4 +1,7 @@
 import os
+import logging
+from decimal import Decimal
+
 import numpy as np
 import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets, QtCore
@@ -12,8 +15,8 @@ from gui.MandelbrotGUI import Ui_Boundary
 from OpenGL.GL import *
 from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY, calculos_mandelbrot
 from core.paletas import PALETTE_REGISTRY
-from decimal import Decimal, getcontext
-getcontext().prec= 100
+
+log = logging.getLogger(__name__)
 
 # --- HILO EN SEGUNDO PLANO PARA EL VIDEO ---
 class WorkerVideo(QThread):
@@ -36,7 +39,7 @@ class WorkerVideo(QThread):
             self.estado['xmin'], self.estado['xmax'],
             self.estado['ymin'], self.estado['ymax'],
             self.render_w, self.render_h,
-            self.estado['max_iter'], self.estado['formula'],
+            self.estado['max_iter'],
             self.estado['tipo_calculo'], self.estado['tipo_fractal']
         )
         motor_clon.real = self.estado.get('real', 0.0)
@@ -46,12 +49,14 @@ class WorkerVideo(QThread):
         ymin, ymax = self.estado['ymin'], self.estado['ymax']
 
         _, func_paleta = PALETTE_REGISTRY[self.estado['palette_index']]
+        # Decimal para no perder precisión en zooms largos (los límites ya vienen en Decimal)
+        factor_zoom = Decimal(str(self.factor_zoom))
 
         for i in range(self.frames):
             motor_clon.actualizar_fractal(
                 xmin, xmax, ymin, ymax,
                 self.render_w, self.render_h,
-                self.estado['max_iter'], self.estado['formula'],
+                self.estado['max_iter'],
                 self.estado['tipo_calculo'], self.estado['tipo_fractal'],
                 motor_clon.real, motor_clon.imag
             )
@@ -68,8 +73,8 @@ class WorkerVideo(QThread):
 
             # Zoom Matemático
             c_x, c_y = (xmin + xmax) / 2, (ymin + ymax) / 2
-            dx = (xmax - xmin) * self.factor_zoom / 2
-            dy = (ymax - ymin) * self.factor_zoom / 2
+            dx = (xmax - xmin) * factor_zoom / 2
+            dy = (ymax - ymin) * factor_zoom / 2
             xmin, xmax = c_x - dx, c_x + dx
             ymin, ymax = c_y - dy, c_y + dy
 
@@ -239,7 +244,7 @@ class MainWindow(QMainWindow):
         self.sincronizar_hacia_motor()
         rgb = self.mandelbrot.obtener_frame_rgb(render_w, render_h)
         plt.imsave(ruta, rgb.astype(np.uint8))
-        print(f"Imagen guardada en {render_w}x{render_h}: {ruta}")
+        log.info("Imagen guardada en %dx%d: %s", render_w, render_h, ruta)
         self.mandelbrot.interaccion_rapida()
 
     def video_dialogo(self):
@@ -271,7 +276,7 @@ class MainWindow(QMainWindow):
         estado_actual = {
             'xmin': self.mandelbrot.xmin, 'xmax': self.mandelbrot.xmax,
             'ymin': self.mandelbrot.ymin, 'ymax': self.mandelbrot.ymax,
-            'max_iter': self.mandelbrot.max_iter, 'formula': self.mandelbrot.formula,
+            'max_iter': self.mandelbrot.max_iter,
             'tipo_calculo': self.mandelbrot.tipo_calculo, 'tipo_fractal': self.mandelbrot.tipo_fractal,
             'real': getattr(self.mandelbrot, 'real', 0.0), 'imag': getattr(self.mandelbrot, 'imag', 0.0),
             'clase_equiv': getattr(self.mandelbrot, 'clase_equiv', 128),
@@ -286,4 +291,4 @@ class MainWindow(QMainWindow):
 
     def _video_terminado(self):
         self.progreso_ui.close()
-        print("¡Secuencia completada!")
+        log.info("Secuencia de video completada")
