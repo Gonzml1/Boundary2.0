@@ -45,7 +45,7 @@ y el log dice qué se omitió.
 | `P` / `O` | Paleta siguiente / anterior |
 | `G` / `H` | Duplicar / dividir iteraciones |
 | `B` / `N` | Duplicar / dividir clase de equivalencia de la paleta |
-| `Q` | Activar/desactivar la calidad progresiva |
+| `Q` | Modo exploración: la imagen se queda en media resolución y sin antialiasing, para navegar rápido; al apagarlo se calcula a resolución completa |
 | `R` | Volver a la vista inicial |
 
 ### Opciones de color (panel "4. COLOR")
