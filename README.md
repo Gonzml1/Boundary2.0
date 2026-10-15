@@ -45,7 +45,7 @@ y el log dice qué se omitió.
 | `P` / `O` | Paleta siguiente / anterior |
 | `G` / `H` | Duplicar / dividir iteraciones |
 | `B` / `N` | Duplicar / dividir clase de equivalencia de la paleta |
-| `Q` | Modo exploración: la imagen se queda en media resolución y sin antialiasing, para navegar rápido; al apagarlo se calcula a resolución completa |
+| `Q` | Modo foto completa: cada imagen se calcula entera a resolución completa y recién ahí se muestra (sin versiones previas borrosas ni la imagen anterior corrida). Apagado, el render es progresivo |
 | `R` | Volver a la vista inicial |
 
 ### Opciones de color (panel "4. COLOR")

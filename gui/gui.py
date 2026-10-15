@@ -78,10 +78,10 @@ class MainWindow(QMainWindow):
 
         self.favoritos = favoritos.cargar()
 
-        # Indicador fijo del modo exploración, a la derecha de la barra de estado
+        # Indicador fijo del modo de render, a la derecha de la barra de estado
         self.indicador_modo = QtWidgets.QLabel()
         self.statusBar().addPermanentWidget(self.indicador_modo)
-        self._al_cambiar_modo_exploracion(False)
+        self._al_cambiar_modo_completo(False)
 
         self.inicializar_combos()
         self._conectar_mvc()
@@ -120,7 +120,7 @@ class MainWindow(QMainWindow):
         self.mandelbrot.parametros_matematicos_cambiados.connect(self.actualizar_cajas_matematicas)
         self.mandelbrot.paleta_cambiada.connect(self._al_cambiar_paleta_desde_teclado)
         self.mandelbrot.render_terminado.connect(self._al_terminar_render)
-        self.mandelbrot.modo_exploracion_cambiado.connect(self._al_cambiar_modo_exploracion)
+        self.mandelbrot.modo_completo_cambiado.connect(self._al_cambiar_modo_completo)
         self.mandelbrot.render_fallido.connect(
             lambda mensaje: self.statusBar().showMessage(f"Error al calcular: {mensaje}", 10000))
 
@@ -205,12 +205,12 @@ class MainWindow(QMainWindow):
         self.ui.angulo_luz_label.setText(f"Luz {valor}°")
         self.sincronizar_hacia_motor()
 
-    def _al_cambiar_modo_exploracion(self, activo):
+    def _al_cambiar_modo_completo(self, activo):
         if activo:
-            self.indicador_modo.setText("EXPLORACIÓN · media resolución  [Q]")
+            self.indicador_modo.setText("FOTO COMPLETA  [Q]")
             self.indicador_modo.setStyleSheet(f"color: {ts.ACENTO};")
         else:
-            self.indicador_modo.setText("RESOLUCIÓN COMPLETA  [Q]")
+            self.indicador_modo.setText("PROGRESIVO  [Q]")
             self.indicador_modo.setStyleSheet(f"color: {ts.TEXTO_TENUE};")
 
     def _al_cambiar_paleta_desde_teclado(self, indice):

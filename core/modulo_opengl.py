@@ -19,9 +19,7 @@ VISTA_INICIAL = (Decimal('-2.0'), Decimal('1.2'), Decimal('-0.9'), Decimal('0.9'
 # Calidad progresiva: cada pedido se renderiza primero chico y después a tamaño completo.
 # Divisor de resolución de cada nivel (el último es la calidad final, con antialiasing si está activo).
 NIVELES_CALIDAD = (8, 2, 1)
-# En modo exploración (tecla Q) la imagen se queda en este nivel: media resolución y sin
-# antialiasing, para navegar rápido aunque estén activadas las opciones caras.
-NIVEL_EXPLORACION = 1
+NIVEL_FINAL = len(NIVELES_CALIDAD) - 1
 
 
 class HiloRender(QThread):
@@ -84,7 +82,7 @@ class MandelbrotWidget(QOpenGLWidget):
     # segundos, opciones aplicadas, ancho, alto, ¿es la calidad final?
     render_terminado = pyqtSignal(float, object, int, int, bool)
     render_fallido = pyqtSignal(str)
-    modo_exploracion_cambiado = pyqtSignal(bool)
+    modo_completo_cambiado = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -99,7 +97,9 @@ class MandelbrotWidget(QOpenGLWidget):
         self.opciones = OpcionesColor()
         self.zoom_in = Decimal('0.5')
         self.zoom_out = Decimal('2.0')
-        self.modo_exploracion = False
+        # Modo foto completa (tecla Q): siempre se calcula la vista entera a resolución completa
+        # y no se muestra nada nuevo hasta que está lista (sin versiones previas ni reproyección)
+        self.modo_completo = False
 
         self.dragging = False
         self.last_pos = None
@@ -162,20 +162,17 @@ class MandelbrotWidget(QOpenGLWidget):
         if not self.tipo_fractal or not self.tipo_calculo:
             return
         self._version += 1
-        self._pedir_nivel(0)
+        self._pedir_nivel(NIVEL_FINAL if self.modo_completo else 0)
         self.update()      # reproyecta la imagen vieja mientras tanto
 
     # Compatibilidad con el nombre anterior
     interaccion_rapida = solicitar_render
 
-    def _ultimo_nivel(self) -> int:
-        return NIVEL_EXPLORACION if self.modo_exploracion else len(NIVELES_CALIDAD) - 1
-
     def _pedir_nivel(self, nivel: int) -> None:
         ancho, alto = self.tamano_render()
         divisor = NIVELES_CALIDAD[nivel]
         pedido = self.pedido_actual(max(1, ancho // divisor), max(1, alto // divisor))
-        if nivel != len(NIVELES_CALIDAD) - 1:
+        if nivel != NIVEL_FINAL:
             # El antialiasing solo a resolución completa: en las previas sería trabajo tirado
             pedido = replace(pedido, opciones=replace(pedido.opciones, antialiasing=False))
         self._hilo.pedir(PedidoPantalla(self._version, nivel, pedido))
@@ -184,7 +181,7 @@ class MandelbrotWidget(QOpenGLWidget):
         p = pp.pedido
         self._imagen_pendiente = imagen.rgb
         self._rect_imagen = (p.xmin, p.xmax, p.ymin, p.ymax)
-        final = pp.nivel >= self._ultimo_nivel()
+        final = pp.nivel == NIVEL_FINAL
         self.render_terminado.emit(imagen.segundos, imagen.aplicadas, p.ancho, p.alto, final)
         if pp.version == self._version and not final:
             self._pedir_nivel(pp.nivel + 1)
@@ -201,16 +198,11 @@ class MandelbrotWidget(QOpenGLWidget):
     #                    PALETAS Y CALIDAD
     # ============================================================
 
-    def toggle_modo_exploracion(self):
-        """Activa/desactiva el modo exploración (tecla Q): media resolución y sin antialiasing."""
-        self.modo_exploracion = not self.modo_exploracion
-        self.modo_exploracion_cambiado.emit(self.modo_exploracion)
-        if not self.tipo_fractal or not self.tipo_calculo:
-            return
-        # La vista no cambió: se pide directo el último nivel del modo nuevo, sin volver a
-        # pasar por la versión borrosa (mientras tanto se sigue viendo la imagen actual)
-        self._version += 1
-        self._pedir_nivel(self._ultimo_nivel())
+    def toggle_modo_completo(self):
+        """Activa/desactiva el modo foto completa (tecla Q)."""
+        self.modo_completo = not self.modo_completo
+        self.modo_completo_cambiado.emit(self.modo_completo)
+        self.solicitar_render()
 
     def next_palette(self):
         self._cambiar_paleta(1)
@@ -288,8 +280,12 @@ class MandelbrotWidget(QOpenGLWidget):
         ancho, alto = self.xmax - self.xmin, self.ymax - self.ymin
         if ancho == 0 or alto == 0:
             return
-        x0, x1 = float((ixmin - self.xmin) / ancho), float((ixmax - self.xmin) / ancho)
-        y0, y1 = float((iymin - self.ymin) / alto), float((iymax - self.ymin) / alto)
+        if self.modo_completo:
+            # Sin reproyectar: la foto anterior queda entera y quieta hasta que llega la nueva
+            x0, x1, y0, y1 = 0.0, 1.0, 0.0, 1.0
+        else:
+            x0, x1 = float((ixmin - self.xmin) / ancho), float((ixmax - self.xmin) / ancho)
+            y0, y1 = float((iymin - self.ymin) / alto), float((iymax - self.ymin) / alto)
 
         glMatrixMode(GL_PROJECTION)
         glLoadIdentity()
@@ -410,7 +406,7 @@ class MandelbrotWidget(QOpenGLWidget):
                 self.clase_equiv = max(1, int(self.clase_equiv / 2))
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
         elif tecla == Qt.Key_Q:
-            self.toggle_modo_exploracion()
+            self.toggle_modo_completo()
             return
         else:
             super().keyPressEvent(event)
