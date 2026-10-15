@@ -38,9 +38,11 @@ struct Perturbacion {
     CD k_d;                           // parámetro de la fórmula (Mandelbrot: el centro C)
     std::vector<CFE> Z_fe;            // la órbita en floatexp (no pierde los valores muy chicos)
     std::vector<CD>  Z_d;             // la misma en double
-    int modo = 0;                     // 0 = double, 1 = floatexp
+    std::vector<CFF> Z_ff;            // la misma en floatexp de mantisa float (modo 2)
+    int modo = 0;                     // 0 = double, 1 = floatexp, 2 = floatexp con mantisa float
     std::vector<Bla<CD, double>> bla_d;
     std::vector<Bla<CFE, FE>>    bla_fe;
+    std::vector<Bla<CFF, FF>>    bla_ff;
     int niveles = 0;
     int off[BLA_MAX_NIVELES] = {0};
     int cnt[BLA_MAX_NIVELES] = {0};
@@ -127,10 +129,13 @@ EXPORT void* pert_crear(int formula, const char* c_re_str, const char* c_im_str,
         p->Z_d[i].re = ldexp(z.re, z.e);
         p->Z_d[i].im = ldexp(z.im, z.e);
     }
+    p->Z_ff.resize(p->largo);
+    for (int i = 0; i < p->largo; ++i) p->Z_ff[i] = a_cff(p->Z_fe[i]);
     return p;
 }
 
 EXPORT int pert_largo(void* h) { return static_cast<Perturbacion*>(h)->largo; }
+
 
 EXPORT void pert_parametro(void* h, double* k_re, double* k_im) {
     const Perturbacion* p = static_cast<Perturbacion*>(h);
@@ -144,8 +149,11 @@ static int preparar_bla(Perturbacion* p, double dc_max_m, int dc_max_e, double e
     if (p->modo == 0)
         return construir_bla<F, CD, double>(p->Z_d.data(), p->largo, ldexp(dc_max_m, dc_max_e),
                                             eps, p->bla_d.data(), p->off, p->cnt);
-    return construir_bla<F, CFE, FE>(p->Z_fe.data(), p->largo, fe_normalizar(dc_max_m, dc_max_e),
-                                     eps, p->bla_fe.data(), p->off, p->cnt);
+    if (p->modo == 1)
+        return construir_bla<F, CFE, FE>(p->Z_fe.data(), p->largo, fe_normalizar(dc_max_m, dc_max_e),
+                                         eps, p->bla_fe.data(), p->off, p->cnt);
+    return construir_bla<F, CFF, FF>(p->Z_ff.data(), p->largo, ff_normalizar((float)dc_max_m, dc_max_e),
+                                     eps, p->bla_ff.data(), p->off, p->cnt);
 }
 
 // Arma la tabla BLA. dc_max = máximo |dc| de la imagen (mantisa, exponente).
@@ -156,8 +164,10 @@ EXPORT int pert_preparar_bla(void* h, int modo, double dc_max_m, int dc_max_e, d
     p->modo = modo;
     int n0 = p->largo > 2 ? p->largo - 2 : 0;
     // Niveles: n0 + n0/2 + n0/4 + ... < 2 n0
-    if (modo == 0) { p->bla_d.resize(2 * (size_t)n0 + 1); p->bla_fe.clear(); }
-    else           { p->bla_fe.resize(2 * (size_t)n0 + 1); p->bla_d.clear(); }
+    p->bla_d.clear(); p->bla_fe.clear(); p->bla_ff.clear();
+    if (modo == 0)      p->bla_d.resize(2 * (size_t)n0 + 1);
+    else if (modo == 1) p->bla_fe.resize(2 * (size_t)n0 + 1);
+    else                p->bla_ff.resize(2 * (size_t)n0 + 1);
     // FORMULAS
     switch (p->formula) {
     default: p->niveles = preparar_bla<Mandelbrot>(p, dc_max_m, dc_max_e, eps);
@@ -205,8 +215,11 @@ static long long render_formula(const Perturbacion* p, FE bx, FE by, FE sx, FE s
     if (p->modo == 0)
         return render<F, CD, double>(p, p->Z_d.data(), p->bla_d.data(), bx, by, sx, sy, a_double(paso),
                                      width, height, max_iter, salidas, out, cancelar);
-    return render<F, CFE, FE>(p, p->Z_fe.data(), p->bla_fe.data(), bx, by, sx, sy, paso,
-                              width, height, max_iter, salidas, out, cancelar);
+    if (p->modo == 1)
+        return render<F, CFE, FE>(p, p->Z_fe.data(), p->bla_fe.data(), bx, by, sx, sy, paso,
+                                  width, height, max_iter, salidas, out, cancelar);
+    return render<F, CFF, FF>(p, p->Z_ff.data(), p->bla_ff.data(), bx, by, sx, sy,
+                              ff_normalizar((float)paso.m, paso.e), width, height, max_iter, salidas, out, cancelar);
 }
 
 // El píxel (i, j) tiene dc = (bx + i * sx, by + j * sy), todo pasado como (mantisa, exponente).
@@ -235,23 +248,32 @@ EXPORT long long pert_render(void* h,
 }
 
 // --- Para la GPU: tamaños y copia de la órbita y la tabla del modo actual ---
+// Bytes del estado de un píxel a mitad de camino (la GPU lo guarda entre lanzamientos)
+EXPORT int pert_tam_estado(int modo) {
+    if (modo == 0) return (int)sizeof(EstadoPixel<CD, double>);
+    if (modo == 1) return (int)sizeof(EstadoPixel<CFE, FE>);
+    return (int)sizeof(EstadoPixel<CFF, FF>);
+}
+
 EXPORT long long pert_bytes_orbita(void* h) {
     const Perturbacion* p = static_cast<Perturbacion*>(h);
-    return (long long)p->largo * (p->modo == 0 ? sizeof(CD) : sizeof(CFE));
+    return (long long)p->largo * (p->modo == 0 ? sizeof(CD) : p->modo == 1 ? sizeof(CFE) : sizeof(CFF));
 }
 
 EXPORT long long pert_bytes_bla(void* h) {
     const Perturbacion* p = static_cast<Perturbacion*>(h);
     long long n = p->niveles ? p->off[p->niveles - 1] + p->cnt[p->niveles - 1] : 0;
-    return n * (p->modo == 0 ? sizeof(Bla<CD, double>) : sizeof(Bla<CFE, FE>));
+    return n * (p->modo == 0 ? sizeof(Bla<CD, double>) : p->modo == 1 ? sizeof(Bla<CFE, FE>) : sizeof(Bla<CFF, FF>));
 }
 
 EXPORT int pert_exportar(void* h, void* orbita, void* bla, int* off, int* cnt) {
     const Perturbacion* p = static_cast<Perturbacion*>(h);
-    if (p->modo == 0) std::memcpy(orbita, p->Z_d.data(), pert_bytes_orbita(h));
-    else              std::memcpy(orbita, p->Z_fe.data(), pert_bytes_orbita(h));
-    if (p->modo == 0) std::memcpy(bla, p->bla_d.data(), pert_bytes_bla(h));
-    else              std::memcpy(bla, p->bla_fe.data(), pert_bytes_bla(h));
+    const void* Z = p->modo == 0 ? (const void*)p->Z_d.data() : p->modo == 1 ? (const void*)p->Z_fe.data()
+                                                                               : (const void*)p->Z_ff.data();
+    const void* tabla = p->modo == 0 ? (const void*)p->bla_d.data() : p->modo == 1 ? (const void*)p->bla_fe.data()
+                                                                                   : (const void*)p->bla_ff.data();
+    std::memcpy(orbita, Z, pert_bytes_orbita(h));
+    std::memcpy(bla, tabla, pert_bytes_bla(h));
     for (int k = 0; k < BLA_MAX_NIVELES; ++k) { off[k] = p->off[k]; cnt[k] = p->cnt[k]; }
     return p->niveles;
 }

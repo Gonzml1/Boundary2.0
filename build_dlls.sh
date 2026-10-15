@@ -13,7 +13,9 @@ set -euo pipefail
 cd "$(dirname "$0")/codigos_cpp"
 
 CXX="${CXX:-g++}"
-FLAGS=(-O3 -march=native -fopenmp -shared -static)
+# -ffp-contract=off: sin fusionar multiplicación y suma (FMA), así la perturbación en CPU da
+# exactamente lo mismo que en GPU (que compila con --fmad=false) y se pueden mezclar cuadros
+FLAGS=(-O3 -march=native -ffp-contract=off -fopenmp -shared -static)
 
 compilar() {
     local nombre="$1"; shift

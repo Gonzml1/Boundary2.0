@@ -55,6 +55,13 @@ METODOS_PROFUNDOS: set[tuple[str, str]] = set()
 LIMITE_DOUBLE = Decimal('1e-13')
 
 
+def variante_rapida(fractal: str, metodo: str) -> str:
+    """La variante en float del método si existe (más rápida y algo menos precisa), si no el mismo.
+    Se usa donde no hace falta toda la precisión: las versiones borrosas y las vistas previas."""
+    rapido = metodo + "_float"
+    return rapido if rapido in FRACTAL_REGISTRY.get(fractal, {}) else metodo
+
+
 class RenderCancelado(Exception):
     """El cálculo se abandonó porque llegó un pedido más nuevo (ver calculos_mandelbrot.cancelar)."""
 
@@ -100,7 +107,14 @@ BLA_EPSILON = 2.0 ** -40
 UMBRAL_FLOATEXP = Decimal('1e-140')
 # FORMULAS: número de cada fórmula en codigos_cpp/perturbacion.cpp (y nombre de sus kernels de GPU)
 FORMULAS = {"mandelbrot": 0}
-SALIDA_SUAVE, SALIDA_DERIVADA = 1, 2
+SALIDA_SUAVE, SALIDA_DERIVADA, DETECTAR_INTERIOR = 1, 2, 4
+# La GPU avanza los píxeles en varios lanzamientos de ~este tiempo: Windows reinicia el driver
+# si un kernel tarda más de 2 s, y entre lanzamientos se puede cancelar
+SEGUNDOS_POR_LANZAMIENTO = 0.15
+PASOS_INICIALES_POR_LANZAMIENTO = 1024
+PASOS_MAX_POR_LANZAMIENTO = 1 << 20
+# Píxeles por lanzamiento como máximo (el estado de cada uno ocupa ~100 bytes en la GPU)
+PIXELES_MAX_POR_LANZAMIENTO = 4_000_000
 
 
 def _a_floatexp(valor: Decimal) -> tuple[float, int]:
@@ -202,6 +216,8 @@ class calculos_mandelbrot:
         self.pedir_derivada = False
         # Otro hilo la pone en 1 para abandonar el cálculo en curso (ver cancelar())
         self.bandera_cancelar = ctypes.c_int(0)
+        # Pasos por lanzamiento en la GPU (se ajusta solo, ver _ajustar_pasos_por_lanzamiento)
+        self._pasos_por_lanzamiento = PASOS_INICIALES_POR_LANZAMIENTO
         self._cache_orbita = None
         self._fijar_limites(xmin, xmax, ymin, ymax)
         self.width = width
@@ -312,7 +328,7 @@ class calculos_mandelbrot:
         resultado_cpu = resultado.get()
         return resultado_cpu
 
-    @register_fractal("Mandelbrot", "test1", requiere="gpu")
+   # @register_fractal("Mandelbrot", "test1", requiere="gpu")
     @medir_tiempo("Mandelbrot GPU trigonométrico")
     def hacer_mandelbrot_gpu_trigonometrico(self) -> np.ndarray:
         C = self._generar_malla_compleja_gpu()
@@ -346,9 +362,10 @@ class calculos_mandelbrot:
     # La órbita de referencia Z se calcula con GMP en el centro de la vista y cada píxel itera
     # solo su diferencia dz, salteando iteraciones con BLA. Ver codigos_cpp/perturbacion.cpp.
     bla_epsilon = BLA_EPSILON        # 0 desactiva el BLA
+    detectar_interior = True         # cortar antes los píxeles del interior del conjunto
     modo_perturbacion = None         # None = automático, 0 = double, 1 = floatexp
 
-    def _preparar_perturbacion(self, formula: str):
+    def _preparar_perturbacion(self, formula: str, modo_forzado: int | None = None):
         c_re = (self.xmin_dec + self.xmax_dec) / 2
         c_im = (self.ymin_dec + self.ymax_dec) / 2
         # Mismo muestreo que np.linspace(xmin, xmax, width) del resto de los backends
@@ -368,7 +385,8 @@ class calculos_mandelbrot:
                                                     self.bandera_cancelar))
         orbita = self._cache_orbita[1]
 
-        modo = self.modo_perturbacion
+        # 0 = double, 1 = floatexp (zoom profundo), 2 = floatexp con mantisa float (métodos _float)
+        modo = modo_forzado if modo_forzado is not None else self.modo_perturbacion
         if modo is None:
             modo = 1 if paso < UMBRAL_FLOATEXP else 0
 
@@ -381,9 +399,7 @@ class calculos_mandelbrot:
 
         dc = tuple(_a_floatexp(v) for v in
                    (self.xmin_dec - c_re, self.ymin_dec - c_im, step_x, step_y, paso))
-        # Para dividir el render en franjas: dc_y de la fila j = base_y + j * step_y
-        filas = (self.ymin_dec - c_im, step_y)
-        return orbita, modo, dc, filas
+        return orbita, modo, dc
 
     def _log_perturbacion(self, orbita, modo, pasos, iteraciones) -> None:
         if log.isEnabledFor(logging.DEBUG):
@@ -392,8 +408,16 @@ class calculos_mandelbrot:
                       orbita.formula, "floatexp" if modo else "double", orbita.niveles, pasos, total,
                       total / max(1, pasos))
 
+    def _ajustar_pasos_por_lanzamiento(self, segundos: float) -> None:
+        """Ajusta cuántos pasos avanza cada píxel por lanzamiento para que cada uno dure ~SEGUNDOS_POR_LANZAMIENTO."""
+        if segundos > 0:
+            factor = min(4.0, max(0.25, SEGUNDOS_POR_LANZAMIENTO / segundos))
+            self._pasos_por_lanzamiento = int(min(PASOS_MAX_POR_LANZAMIENTO,
+                                                  max(256, self._pasos_por_lanzamiento * factor)))
+
     def _salidas_pedidas(self) -> int:
-        return (SALIDA_SUAVE if self.pedir_suave else 0) | (SALIDA_DERIVADA if self.pedir_derivada else 0)
+        return ((SALIDA_SUAVE if self.pedir_suave else 0) | (SALIDA_DERIVADA if self.pedir_derivada else 0)
+                | (DETECTAR_INTERIOR if self.detectar_interior else 0))
 
     def _resultado(self, iteraciones, suave, distancia, nx, ny, salidas) -> Resultado:
         con_derivada = bool(salidas & SALIDA_DERIVADA)
@@ -403,9 +427,9 @@ class calculos_mandelbrot:
                          nx if con_derivada else None,
                          ny if con_derivada else None)
 
-    def _render_perturbacion(self, formula: str, en_gpu: bool) -> Resultado:
+    def _render_perturbacion(self, formula: str, en_gpu: bool, en_float: bool = False) -> Resultado:
         """Render por perturbación de cualquier fórmula de FORMULAS, en CPU o GPU."""
-        orbita, modo, dc, (base_y, step_y) = self._preparar_perturbacion(formula)
+        orbita, modo, dc = self._preparar_perturbacion(formula, 2 if en_float else None)
         salidas = self._salidas_pedidas()
         forma = (self.height, self.width)
         # Las salidas que no se piden se reemplazan por una matriz mínima (no se escriben)
@@ -428,24 +452,43 @@ class calculos_mandelbrot:
             pasos_gpu = cp.zeros(1, dtype=cp.uint64)
             kernel = kernel_perturbacion(formula, modo)
             fe_args = lambda fe: [np.float64(fe[0]), np.int32(fe[1])]
-            # Se lanza por franjas de filas: entre una y otra se puede abandonar el cálculo
-            alto_franja = max(8, -(-self.height // 32))
+            tam_estado = cpp.pert_tam_estado(modo)
+            # Cada render arranca con pocos pasos por lanzamiento y se ajusta sobre la marcha: si
+            # se heredara el valor de un render liviano, el primer lanzamiento de uno pesado
+            # podría tardar segundos (sin poder cancelarse y con riesgo de que Windows reinicie el driver)
+            self._pasos_por_lanzamiento = PASOS_INICIALES_POR_LANZAMIENTO
+            # Franjas solo para no pasarse de memoria con el estado de cada píxel
+            alto_franja = max(1, min(self.height, PIXELES_MAX_POR_LANZAMIENTO // max(1, self.width)))
             for fila in range(0, self.height, alto_franja):
-                self._revisar_cancelacion()
                 filas = min(alto_franja, self.height - fila)
                 por_fila = lambda m: m[fila:fila + filas] if m.shape[0] > 1 else m
+                estados = cp.empty(filas * self.width * tam_estado, dtype=cp.uint8)
+                pendientes = cp.zeros(1, dtype=cp.uint32)
                 bloque = (16, 16)
                 grilla = ((self.width + 15) // 16, (filas + 15) // 16)
-                kernel(grilla, bloque, (
-                    Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
-                    *fe_args(dc[0]), *fe_args(_a_floatexp(base_y + fila * step_y)),
-                    *fe_args(dc[2]), *fe_args(dc[3]), *fe_args(dc[4]),
-                    np.float64(orbita.k[0]), np.float64(orbita.k[1]),
-                    np.int32(self.width), np.int32(filas), np.int32(self.max_iter), np.int32(salidas),
-                    por_fila(iteraciones), por_fila(suave), por_fila(distancia), por_fila(nx), por_fila(ny),
-                    pasos_gpu
-                ))
-                cp.cuda.Stream.null.synchronize()
+                iniciar = 1
+                # Lanzamientos reanudables: cada uno avanza todos los píxeles como mucho
+                # `pasos_por_lanzamiento` pasos. Ninguno dura más de lo que Windows tolera para un
+                # kernel, se puede cancelar entre lanzamientos, y no hay franjas esperando a su
+                # píxel más lento.
+                while True:
+                    self._revisar_cancelacion()
+                    pendientes.fill(0)
+                    inicio = time.perf_counter()
+                    kernel(grilla, bloque, (
+                        Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
+                        *fe_args(dc[0]), *fe_args(dc[1]), *fe_args(dc[2]), *fe_args(dc[3]), *fe_args(dc[4]),
+                        np.float64(orbita.k[0]), np.float64(orbita.k[1]),
+                        np.int32(self.width), np.int32(filas), np.int32(fila), np.int32(self.max_iter),
+                        np.int32(salidas), estados, np.int32(iniciar), np.int64(self._pasos_por_lanzamiento),
+                        por_fila(iteraciones), por_fila(suave), por_fila(distancia), por_fila(nx), por_fila(ny),
+                        pasos_gpu, pendientes
+                    ))
+                    cp.cuda.Stream.null.synchronize()
+                    self._ajustar_pasos_por_lanzamiento(time.perf_counter() - inicio)
+                    iniciar = 0
+                    if int(pendientes.get()[0]) == 0:
+                        break
             iteraciones, suave, distancia, nx, ny = (x.get() for x in (iteraciones, suave, distancia, nx, ny))
             pasos = int(pasos_gpu.get()[0])
 
@@ -463,6 +506,16 @@ class calculos_mandelbrot:
     def hacer_mandelbrot_perturbacion_gpu(self) -> Resultado:
         return self._render_perturbacion("mandelbrot", en_gpu=True)
 
+    # Variante en float (24 bits de mantisa): en GPU es varias veces más rápida (las GeForce
+    # hacen float ~64 veces más rápido que double), a cambio de algo de precisión en los píxeles
+    # caóticos. En CPU no conviene (ahí double es igual de rápido), así que no se registra; la
+    # versión de CPU (_render_perturbacion(..., en_gpu=False, en_float=True)) da exactamente lo
+    # mismo y sirve para verificarla.
+    @register_fractal("Mandelbrot", "perturbacion_gpu_float", requiere=("gpu", "perturbacion.dll"), profundo=True)
+    @medir_tiempo("Mandelbrot Perturbacion GPU float")
+    def hacer_mandelbrot_perturbacion_gpu_float(self) -> Resultado:
+        return self._render_perturbacion("mandelbrot", en_gpu=True, en_float=True)
+
     @register_fractal("Mandelbrot", "gmp", requiere="gmp_puro.dll", profundo=True)
     @medir_tiempo("Gmp")
     def hacer_mandelbrot_gmp_puro(self) -> np.ndarray:
@@ -476,7 +529,7 @@ class calculos_mandelbrot:
         )
         return output
 
-    @register_fractal("Mandelbrot", "GPU_Cupy_Espiral", requiere="gpu")
+   # @register_fractal("Mandelbrot", "GPU_Cupy_Espiral", requiere="gpu")
     @medir_tiempo("Mandelbrot Espiral GPU")
     def hacer_mandelbrot_espiral(self) -> np.ndarray:
         C = self._generar_malla_compleja_gpu().ravel() 
@@ -495,7 +548,7 @@ class calculos_mandelbrot:
         
         return res_normalizado
 
-    @register_fractal("Mandelbrot", "GPU_Cupy_Triangulo", requiere="gpu")
+    #@register_fractal("Mandelbrot", "GPU_Cupy_Triangulo", requiere="gpu")
     @medir_tiempo("Mandelbrot Triangulo GPU")
     def hacer_mandelbrot_triangulo(self) -> np.ndarray:
         C = self._generar_malla_compleja_gpu().ravel() 
@@ -511,7 +564,7 @@ class calculos_mandelbrot:
         
         return res_normalizado
     
-    @register_fractal("Mandelbrot", "GPU_Cupy_Variado", requiere="gpu")
+    #@register_fractal("Mandelbrot", "GPU_Cupy_Variado", requiere="gpu")
     @medir_tiempo("Mandelbrot GPU variado")
     def hacer_mandelbrot_generico(self) -> np.ndarray:
         C = self._generar_malla_compleja_gpu().ravel()

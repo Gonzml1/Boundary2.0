@@ -3,7 +3,9 @@ import os
 import time
 import shutil
 import logging
+import threading
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace, asdict
 from decimal import Decimal
 
@@ -11,7 +13,7 @@ from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 
-from core.modulo_de_calculo_fractales import RenderCancelado
+from core.modulo_de_calculo_fractales import RenderCancelado, FRACTAL_REGISTRY, variante_rapida
 from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, PedidoRender, OpcionesColor, guardar_imagen
 from core.video import (ConfigVideo, planificar_zoom, armar_mp4, nombre_cuadro, guardar_plan,
@@ -22,6 +24,21 @@ log = logging.getLogger(__name__)
 RESOLUCIONES = {"Full HD (1920x1080)": (1920, 1080), "4K (3840x2160)": (3840, 2160), "HD (1280x720)": (1280, 720)}
 ANCHO_VISTA_PREVIA = 320
 FPS_MAX_VISTA_PREVIA = 15
+# Hilos que comprimen y guardan los PNG mientras se calculan los cuadros siguientes, y cuántos
+# cuadros calculados pueden esperar a ser guardados (para no llenar la memoria)
+HILOS_GUARDADO = 2
+MAX_CUADROS_EN_ESPERA = 6
+
+
+def metodos_para_video(pedido: PedidoRender, usar_cpu: bool) -> list[str]:
+    """Métodos que calculan los cuadros en paralelo: el elegido y, si es de GPU y existe, su
+    versión de CPU (dan la misma imagen, así que los cuadros se pueden repartir)."""
+    metodos = [pedido.tipo_calculo]
+    if usar_cpu and "_gpu" in pedido.tipo_calculo:
+        cpu = pedido.tipo_calculo.replace("_gpu", "_cpu")      # perturbacion_gpu_float -> perturbacion_cpu_float
+        if cpu in FRACTAL_REGISTRY.get(pedido.tipo_fractal, {}):
+            metodos.append(cpu)
+    return metodos
 
 
 def formatear_duracion(segundos: float) -> str:
@@ -54,7 +71,10 @@ def pedido_desde_plan(datos: dict, config: ConfigVideo) -> PedidoRender:
 
 class WorkerVideo(QThread):
     """Renderiza un zoom desde el fractal entero hasta la vista del pedido (ver core/video.py).
-    Si en la carpeta ya hay cuadros hechos (un video cancelado), los saltea."""
+
+    - Si el método es de GPU y tiene versión de CPU, las dos calculan cuadros a la vez.
+    - Los PNG se comprimen y guardan en otros hilos mientras se calculan los cuadros siguientes.
+    - Si en la carpeta ya hay cuadros hechos (un video cancelado), los saltea."""
     empezo = pyqtSignal(int, int)    # cuadros ya hechos, total
     progreso = pyqtSignal(int, int)  # cuadros hechos, total
     terminado = pyqtSignal(str)      # mensaje final
@@ -64,38 +84,84 @@ class WorkerVideo(QThread):
         self.pedido = pedido
         self.carpeta = carpeta
         self.config = config
-        self._renderizador = Renderizador(tam_cache=0)
+        self.metodos = metodos_para_video(pedido, config.usar_cpu)
+        self._renderizadores = [Renderizador(tam_cache=0) for _ in self.metodos]
+        self._candado = threading.Lock()
+        self._hechos = 0
+        self._error = None
 
     def cancelar(self) -> None:
-        """Corta en el cuadro en curso (no espera a que termine)."""
+        """Corta en los cuadros en curso (no espera a que terminen)."""
         self.requestInterruption()
-        self._renderizador.cancelar()
+        for r in self._renderizadores:
+            r.cancelar()
+
+    def _contar_hecho(self, total: int) -> None:
+        with self._candado:
+            self._hechos += 1
+            hechos = self._hechos
+        self.progreso.emit(hechos, total)
 
     def run(self):
         p, cfg = self.pedido, self.config
         total = cfg.cuadros
         guardar_plan(self.carpeta, p, cfg, PALETTE_REGISTRY[p.paleta][0])
-        hechos = cuadros_hechos(self.carpeta, cfg)
-        self.empezo.emit(hechos, total)
+        self._hechos = cuadros_hechos(self.carpeta, cfg)
+        self.empezo.emit(self._hechos, total)
+        log.info("Video con %s", " + ".join(self.metodos))
 
         plan = planificar_zoom(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto,
                                cfg.cuadros_zoom, p.max_iter, cfg.suavizado)
-        try:
-            for i, cuadro in enumerate(plan):
-                ruta = os.path.join(self.carpeta, nombre_cuadro(i))
-                if os.path.exists(ruta):
-                    continue
-                if self.isInterruptionRequested():
-                    raise RenderCancelado()
+        pendientes = iter([(i, c) for i, c in enumerate(plan)
+                           if not os.path.exists(os.path.join(self.carpeta, nombre_cuadro(i)))])
+        espacio = threading.Semaphore(MAX_CUADROS_EN_ESPERA)
+
+        def guardar(ruta, rgb):
+            try:
+                guardar_imagen(ruta, rgb)
+                self._contar_hecho(total)
+            except Exception as e:
+                self._error = e
+                self.cancelar()
+            finally:
+                espacio.release()
+
+        def calcular(metodo, renderizador, guardado):
+            while not self.isInterruptionRequested():
+                with self._candado:
+                    siguiente = next(pendientes, None)
+                if siguiente is None:
+                    return
+                i, cuadro = siguiente
                 # Mismas iteraciones (y colores) que la vista actual; solo cambia la región
                 pedido = replace(p, xmin=cuadro.xmin, xmax=cuadro.xmax, ymin=cuadro.ymin, ymax=cuadro.ymax,
-                                 max_iter=cuadro.max_iter)
-                guardar_imagen(ruta, self._renderizador.renderizar(pedido).rgb)
-                hechos += 1
-                self.progreso.emit(hechos, total)
-        except RenderCancelado:
+                                 max_iter=cuadro.max_iter, tipo_calculo=metodo)
+                try:
+                    rgb = renderizador.renderizar(pedido).rgb
+                except RenderCancelado:
+                    return
+                except Exception as e:
+                    log.exception("Falló el cuadro %d con %s", i + 1, metodo)
+                    self._error = e
+                    self.cancelar()
+                    return
+                espacio.acquire()
+                guardado.submit(guardar, os.path.join(self.carpeta, nombre_cuadro(i)), rgb)
+
+        with ThreadPoolExecutor(HILOS_GUARDADO) as guardado:
+            hilos = [threading.Thread(target=calcular, args=(m, r, guardado), daemon=True)
+                     for m, r in zip(self.metodos, self._renderizadores)]
+            for hilo in hilos:
+                hilo.start()
+            for hilo in hilos:
+                hilo.join()
+
+        if self._error is not None:
+            self.terminado.emit(f"El video se detuvo por un error: {self._error}")
+            return
+        if self.isInterruptionRequested():
             self.terminado.emit(
-                f"Video cancelado en {hechos}/{total} cuadros. Para seguirlo: Video de zoom → "
+                f"Video cancelado en {self._hechos}/{total} cuadros. Para seguirlo: Video de zoom → "
                 f"Continuar video… y elegí la carpeta {self.carpeta}")
             return
 
@@ -105,8 +171,7 @@ class WorkerVideo(QThread):
             ruta = os.path.join(self.carpeta, nombre_cuadro(i))
             if not os.path.exists(ruta):
                 shutil.copyfile(ultimo, ruta)
-                hechos += 1
-                self.progreso.emit(hechos, total)
+                self._contar_hecho(total)
 
         mp4 = armar_mp4(self.carpeta, cfg.fps)
         self.terminado.emit(f"Video listo: {mp4}" if mp4 else f"Cuadros listos en {self.carpeta}")
@@ -234,6 +299,8 @@ class DialogoVideo(QtWidgets.QDialog):
         self.pausa.setDecimals(1)
         self.pausa.setSuffix(" s")
         self.pausa.setValue(float(ajustes.value("video/pausa", 0.0)))
+        self.usar_cpu = QtWidgets.QCheckBox("Calcular también con la CPU (más rápido)")
+        self.usar_cpu.setChecked(ajustes.value("video/usar_cpu", True, type=bool))
         self.resumen = QtWidgets.QLabel()
 
         formulario = QtWidgets.QFormLayout()
@@ -242,6 +309,7 @@ class DialogoVideo(QtWidgets.QDialog):
         formulario.addRow("Fotogramas por segundo", self.fps)
         formulario.addRow("", self.suavizado)
         formulario.addRow("Pausa en la última imagen", self.pausa)
+        formulario.addRow("", self.usar_cpu)
 
         boton_previa = QtWidgets.QPushButton("Vista previa")
         boton_continuar = QtWidgets.QPushButton("Continuar video…")
@@ -270,7 +338,7 @@ class DialogoVideo(QtWidgets.QDialog):
     def config(self) -> ConfigVideo:
         ancho, alto = self.resoluciones[self.resolucion.currentText()]
         return ConfigVideo(ancho, alto, self.duracion.value(), self.fps.value(),
-                           self.suavizado.isChecked(), self.pausa.value())
+                           self.suavizado.isChecked(), self.pausa.value(), self.usar_cpu.isChecked())
 
     def _actualizar_resumen(self):
         c = self.config()
@@ -285,6 +353,7 @@ class DialogoVideo(QtWidgets.QDialog):
         self.ajustes.setValue("video/fps", self.fps.value())
         self.ajustes.setValue("video/suavizado", self.suavizado.isChecked())
         self.ajustes.setValue("video/pausa", self.pausa.value())
+        self.ajustes.setValue("video/usar_cpu", self.usar_cpu.isChecked())
 
     def _vista_previa(self):
         c = self.config()
@@ -293,7 +362,9 @@ class DialogoVideo(QtWidgets.QDialog):
         fps = min(c.fps, FPS_MAX_VISTA_PREVIA)
         previa = replace(c, ancho=ancho, alto=alto, fps=fps)
         pedido = self.crear_pedido(ancho, alto)
-        pedido = replace(pedido, opciones=replace(pedido.opciones, antialiasing=False))
+        # Vista previa: sin antialiasing y con la variante en float del método (más rápida)
+        pedido = replace(pedido, opciones=replace(pedido.opciones, antialiasing=False),
+                         tipo_calculo=variante_rapida(pedido.tipo_fractal, pedido.tipo_calculo))
         VentanaVistaPrevia(pedido, previa, self).exec()
 
     def _renderizar(self):

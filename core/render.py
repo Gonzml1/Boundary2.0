@@ -67,7 +67,7 @@ class Renderizador:
     (paleta, ciclo, luz, color del interior), se recolorea sin volver a calcular el fractal.
     """
 
-    def __init__(self, tam_cache: int = 4):
+    def __init__(self, tam_cache: int = 8):
         self.motor = calculos_mandelbrot(Decimal(-2), Decimal(1), Decimal(-1), Decimal(1), 1, 1, 1, "", "")
         self.tam_cache = tam_cache
         # clave de cálculo -> (pidió suave, pidió derivada, Resultado)

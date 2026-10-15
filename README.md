@@ -96,6 +96,20 @@ la vista actual.
   `frame_2.png`, ... y, si está instalado ffmpeg, el `zoom.mp4`. El progreso muestra cuánto falta.
 - **Continuar video…**: si se cancela (o se corta la luz), se puede retomar eligiendo su carpeta. Los
   cuadros que ya están no se recalculan: la carpeta guarda todos los parámetros en `video.json`.
+- **Calcular también con la CPU** (activado por defecto): si el método es `perturbacion_gpu`, la CPU
+  calcula cuadros al mismo tiempo con `perturbacion_cpu`. Las dos dan exactamente la misma imagen (ver
+  más abajo), así que mezclar cuadros no se nota. Los PNG se comprimen en otros hilos mientras se
+  calculan los cuadros siguientes.
+
+#### Qué método usar para un video
+
+| Método | Velocidad | Precisión |
+|---|---|---|
+| `perturbacion_gpu` (+ CPU) | ~2× más rápido que solo GPU | La de siempre: idéntico a GMP salvo píxeles caóticos |
+| `perturbacion_gpu_float` | ~3× (hasta 10× en zonas sin muchas iteraciones) | Mantisa de 24 bits: ~3 % de los píxeles cambia, todos en los filamentos caóticos (a simple vista no se distingue) |
+
+Medido con un video de prueba de 20 cuadros en 960×540 a 20.000 iteraciones: 54,7 s antes de estas
+mejoras, 20 a 30 s con `perturbacion_gpu` + CPU y 16,6 s con `perturbacion_gpu_float`.
 
 ### Favoritos
 
@@ -171,6 +185,29 @@ y la GPU lo compila con NVRTC. Funciona así:
 5. **floatexp.** Cuando el paso entre píxeles baja de 1e-140, `dc` y `dz` dejan de entrar cómodos
    en un double. Ahí se pasa a un double con exponente entero aparte, que no tiene underflow.
    Es más lento por paso, pero con BLA se hacen muy pocos pasos.
+6. **Detección del interior.** Además se acumula `|dz_n/dz_1|^2 = prod |2 z_k|^2`. Dentro del conjunto la
+   órbita cae en un ciclo atractor y ese producto tiende a cero; cuando baja de `1e-12` el píxel se da por
+   interior y se corta ahí, en vez de hacer todas las iteraciones. Con iteraciones altas, las vistas con
+   mucho interior salen hasta 15 veces más rápido. En las pruebas no marcó como interior ningún píxel que
+   escapara.
+
+**CPU y GPU dan exactamente lo mismo.** Las dos DLL/kernels se compilan sin fusionar multiplicaciones y
+sumas por su cuenta (`-ffp-contract=off` en g++, `--fmad=false` en NVRTC) y las FMA se escriben a mano
+en el núcleo, así las dos hacen las mismas operaciones con el mismo redondeo. Por eso el video puede
+repartir cuadros entre las dos.
+
+**La GPU calcula en lanzamientos reanudables.** Windows reinicia el driver de video si un kernel tarda
+más de 2 segundos. En vez de partir la imagen en franjas (cada franja espera a su píxel más lento), cada
+lanzamiento avanza todos los píxeles una cantidad limitada de pasos, guarda su estado y sigue en el
+siguiente. Cada lanzamiento dura ~150 ms, y entre uno y otro se puede cancelar.
+
+**`perturbacion_gpu_float`** usa un floatexp con mantisa `float` en vez de `double`: las GeForce hacen
+cuentas en float unas 64 veces más rápido. La app lo usa sola en las versiones borrosas de la calidad
+progresiva y en la vista previa del video; la imagen final usa el método elegido.
+
+Se probó también usar como referencia el núcleo del minibrot cercano (encontrado con Newton) en vez del
+centro: con rebasing ganaba apenas un 5-15 % y en algunas ubicaciones encontraba núcleos lejanos, así
+que se descartó.
 
 Resultados medidos (comparados píxel a píxel con el cálculo de GMP puro, `gmp`):
 

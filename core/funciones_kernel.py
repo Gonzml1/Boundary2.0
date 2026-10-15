@@ -199,46 +199,70 @@ _RUTA_HEADER_PERTURBACION = os.path.join(
     os.path.dirname(__file__), os.pardir, 'codigos_cpp', 'perturbacion_core.h'
 )
 _KERNELS_PERTURBACION = r"""
+// Lanzamiento reanudable: cada hilo es un píxel. En el primer lanzamiento (iniciar = 1) arranca el
+// píxel; en los siguientes retoma el estado guardado. Avanza como mucho `max_pasos` pasos: si
+// termina escribe el resultado, si no guarda el estado y suma 1 a `pendientes`.
+// Se lanza por franjas de `height` filas desde la fila `fila0` (las salidas apuntan al principio
+// de la franja). dc se calcula igual que en la CPU (base + fila * paso), así las dos dan lo mismo.
 template<class F, class C, class R>
 __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabla,
                                     const int* off, const int* cnt, int niveles,
                                     double bx_m, int bx_e, double by_m, int by_e,
                                     double sx_m, int sx_e, double sy_m, int sy_e,
                                     double paso_m, int paso_e, double k_re, double k_im,
-                                    int width, int height, int max_iter, int salidas,
+                                    int width, int height, int fila0, int max_iter, int salidas,
+                                    EstadoPixel<C, R>* estados, int iniciar, long long max_pasos,
                                     int* iter, float* suave, float* distancia, float* nx, float* ny,
-                                    unsigned long long* pasos) {
+                                    unsigned long long* pasos, unsigned int* pendientes) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
-    FE dc_re = fe_normalizar(bx_m, bx_e) + fe_normalizar(sx_m, sx_e) * fe((double)x);
-    FE dc_im = fe_normalizar(by_m, by_e) + fe_normalizar(sy_m, sy_e) * fe((double)y);
-    FE paso_fe = fe_normalizar(paso_m, paso_e);
-    long long p = 0;
-    Pixel px = iterar_pixel<F, C, R>(Z, largo, tabla, off, cnt, niveles,
-                                     complejo_fe<C>(dc_re, dc_im), complejo<C>(k_re, k_im),
-                                     max_iter, salidas, convertir_paso<R>(paso_fe), &p);
     int idx = y * width + x;
+    FE dc_re = fe_normalizar(bx_m, bx_e) + fe_normalizar(sx_m, sx_e) * fe((double)x);
+    FE dc_im = fe_normalizar(by_m, by_e) + fe_normalizar(sy_m, sy_e) * fe((double)(fila0 + y));
+    C dc = complejo_fe<C>(dc_re, dc_im);
+
+    EstadoPixel<C, R> e;
+    if (iniciar) {
+        iniciar_pixel<F, C, R>(e, Z, dc);
+    } else {
+        e = estados[idx];
+        if (e.fin != PIXEL_EN_CURSO) return;
+    }
+    long long p = 0;
+    avanzar_pixel<F, C, R>(e, Z, largo, tabla, off, cnt, niveles, dc, max_iter, salidas, max_pasos, &p);
+    estados[idx] = e;
+    atomicAdd(pasos, (unsigned long long)p);
+    if (e.fin == PIXEL_EN_CURSO) {
+        atomicAdd(pendientes, 1u);
+        return;
+    }
+    Pixel px = terminar_pixel<F, C, R>(e, dc, complejo<C>(k_re, k_im), max_iter, salidas,
+                                       convertir_paso<R>(fe_normalizar(paso_m, paso_e)));
     iter[idx] = px.n;
     if (salidas & SALIDA_SUAVE) suave[idx] = px.suave;
     if (salidas & SALIDA_DERIVADA) { distancia[idx] = px.distancia; nx[idx] = px.nx; ny[idx] = px.ny; }
-    atomicAdd(pasos, (unsigned long long)p);
 }
 
 #define ARGS(C, R) const C* Z, int largo, const Bla<C, R>* tabla, const int* off, const int* cnt, \
     int niveles, double bx_m, int bx_e, double by_m, int by_e, double sx_m, int sx_e, \
     double sy_m, int sy_e, double paso_m, int paso_e, double k_re, double k_im, \
-    int width, int height, int max_iter, int salidas, \
-    int* iter, float* suave, float* distancia, float* nx, float* ny, unsigned long long* pasos
+    int width, int height, int fila0, int max_iter, int salidas, \
+    EstadoPixel<C, R>* estados, int iniciar, long long max_pasos, \
+    int* iter, float* suave, float* distancia, float* nx, float* ny, \
+    unsigned long long* pasos, unsigned int* pendientes
 #define PASAR Z, largo, tabla, off, cnt, niveles, bx_m, bx_e, by_m, by_e, sx_m, sx_e, sy_m, sy_e, \
-    paso_m, paso_e, k_re, k_im, width, height, max_iter, salidas, iter, suave, distancia, nx, ny, pasos
+    paso_m, paso_e, k_re, k_im, width, height, fila0, max_iter, salidas, estados, iniciar, max_pasos, \
+    iter, suave, distancia, nx, ny, pasos, pendientes
 
-// Un par de kernels (double / floatexp) por fórmula
+// Tres kernels (double / floatexp / floatexp con mantisa float) por fórmula
 #define KERNELS_FORMULA(F, nombre) \
     extern "C" __global__ void perturbacion_##nombre##_double(ARGS(CD, double)) \
         { render_perturbacion<F, CD, double>(PASAR); } \
     extern "C" __global__ void perturbacion_##nombre##_floatexp(ARGS(CFE, FE)) \
-        { render_perturbacion<F, CFE, FE>(PASAR); }
+        { render_perturbacion<F, CFE, FE>(PASAR); } \
+    extern "C" __global__ void perturbacion_##nombre##_float(ARGS(CFF, FF)) \
+        { render_perturbacion<F, CFF, FF>(PASAR); }
 
 // FORMULAS
 KERNELS_FORMULA(Mandelbrot, mandelbrot)
@@ -247,14 +271,18 @@ KERNELS_FORMULA(Mandelbrot, mandelbrot)
 _modulo_perturbacion = None
 
 def kernel_perturbacion(formula: str, modo: int):
-    """Kernel de la fórmula para el modo (0 = double, 1 = floatexp). Se compila la primera vez."""
+    """Kernel de la fórmula para el modo (0 = double, 1 = floatexp, 2 = floatexp con mantisa float).
+    Se compila la primera vez."""
     global _modulo_perturbacion
     if _modulo_perturbacion is None:
         with open(_RUTA_HEADER_PERTURBACION, encoding='utf-8') as f:
             header = f.read()
-        _modulo_perturbacion = cp.RawModule(code=header + _AYUDAS_GPU + _KERNELS_PERTURBACION)
+        # --fmad=false: mismo redondeo que la DLL de CPU (compilada con -ffp-contract=off), así
+        # CPU y GPU dan resultados idénticos y el video puede repartir cuadros entre las dos
+        _modulo_perturbacion = cp.RawModule(code=header + _AYUDAS_GPU + _KERNELS_PERTURBACION,
+                                            options=('--fmad=false',))
     return _modulo_perturbacion.get_function(
-        f"perturbacion_{formula}_{'double' if modo == 0 else 'floatexp'}"
+        f"perturbacion_{formula}_{('double', 'floatexp', 'float')[modo]}"
     )
 
 # El paso entre píxeles llega como floatexp; en modo double se convierte
@@ -262,6 +290,7 @@ _AYUDAS_GPU = r"""
 template<class R> __device__ R convertir_paso(FE p);
 template<> __device__ double convertir_paso<double>(FE p) { return a_double(p); }
 template<> __device__ FE convertir_paso<FE>(FE p) { return p; }
+template<> __device__ FF convertir_paso<FF>(FE p) { return ff_normalizar((float)p.m, p.e); }
 """
 
 mandelbrot_espiral_kernel = cp.ElementwiseKernel(

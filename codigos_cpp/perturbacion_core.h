@@ -21,8 +21,9 @@
   #define HD __host__ __device__ __forceinline__
 #else
   #include <cmath>
+  #include <math.h>      // frexpf, ldexpf, fmaf... (versiones float)
   using std::frexp; using std::ldexp; using std::fabs; using std::fmax; using std::sqrt;
-  using std::log; using std::log2;
+  using std::log; using std::log2; using std::fma;
   #define HD inline
 #endif
 
@@ -58,7 +59,16 @@ HD double a_double(double a) { return a; }
 
 // --- CD ---
 HD CD operator+(CD a, CD b) { CD r = {a.re + b.re, a.im + b.im}; return r; }
-HD CD operator*(CD a, CD b) { CD r = {a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re}; return r; }
+// Las multiplicaciones usan FMA explícito: los compiladores tienen prohibido fusionar por su
+// cuenta (-ffp-contract=off, --fmad=false), así CPU y GPU hacen exactamente las mismas
+// operaciones y dan el mismo resultado bit a bit, sin perder la velocidad de las FMA.
+HD CD operator*(CD a, CD b) {
+    CD r = {fma(a.re, b.re, -(a.im * b.im)), fma(a.re, b.im, a.im * b.re)}; return r;
+}
+// a * b + c
+HD CD mul_sum(CD a, CD b, CD c) {
+    CD r = {fma(a.re, b.re, fma(-a.im, b.im, c.re)), fma(a.re, b.im, fma(a.im, b.re, c.im))}; return r;
+}
 HD CD operator-(CD a, CD b) { CD r = {a.re - b.re, a.im - b.im}; return r; }
 HD CD doble(CD a) { CD r = {2.0 * a.re, 2.0 * a.im}; return r; }
 HD CD conjugado(CD a) { a.im = -a.im; return a; }
@@ -85,11 +95,12 @@ HD CFE operator*(CFE a, CFE b) {
 }
 HD CFE operator-(CFE a, CFE b) { b.re = -b.re; b.im = -b.im; return a + b; }
 HD CFE doble(CFE a) { a.e += 1; return a; }
+HD CFE mul_sum(CFE a, CFE b, CFE c) { return a * b + c; }
 HD CFE conjugado(CFE a) { a.im = -a.im; return a; }
 
 // --- Operaciones genéricas: cada tipo complejo C tiene un tipo real R asociado ---
 // norma2 = |z|^2, modulo = |z|, cota = sqrt(2) * max(|re|, |im|) >= |z| (barata y sin underflow)
-HD double norma2(CD a) { return a.re * a.re + a.im * a.im; }
+HD double norma2(CD a) { return fma(a.re, a.re, a.im * a.im); }
 HD double modulo(CD a) { return sqrt(norma2(a)); }
 HD double cota(CD a)   { return 1.4142135623730951 * fmax(fabs(a.re), fabs(a.im)); }
 HD bool   finito(CD a) { return finito(a.re) && finito(a.im); }
@@ -143,6 +154,78 @@ template<> HD CFE complejo_fe<CFE>(FE re, FE im) {
 }
 
 // ---------------------------------------------------------------------------
+// floatexp con mantisa float (FF / CFF)
+// ---------------------------------------------------------------------------
+// Igual que FE / CFE pero con 24 bits de mantisa en vez de 53. Las placas GeForce hacen
+// cuentas en float unas 64 veces más rápido que en double, así que en GPU es mucho más rápido;
+// a cambio es menos preciso (se usa solo en los métodos "_float").
+
+struct FF  { float m; int e; };
+struct CFF { float re, im; int e; };
+
+HD bool finito(float x) { return x - x == 0.0f; }
+HD FF ff_normalizar(float m, int e) {
+    if (m == 0.0f || !finito(m)) { FF r = {m, 0}; return r; }
+    int k; float mm = frexpf(m, &k);
+    FF r = {mm, e + k}; return r;
+}
+HD FF ff(double x) { FE f = fe(x); return ff_normalizar((float)f.m, f.e); }
+HD FF operator*(FF a, FF b) { return ff_normalizar(a.m * b.m, a.e + b.e); }
+HD FF operator/(FF a, FF b) { return ff_normalizar(a.m / b.m, a.e - b.e); }
+HD FF operator+(FF a, FF b) {
+    if (a.m == 0.0f) return b;
+    if (b.m == 0.0f) return a;
+    if (a.e >= b.e) return ff_normalizar(a.m + ldexpf(b.m, b.e - a.e), a.e);
+    return ff_normalizar(b.m + ldexpf(a.m, a.e - b.e), b.e);
+}
+HD FF operator-(FF a, FF b) { b.m = -b.m; return a + b; }
+HD double a_double(FF a) { return ldexp((double)a.m, a.e); }
+
+HD CFF cff_normalizar(float re, float im, int e) {
+    float m = fmaxf(fabsf(re), fabsf(im));
+    if (m == 0.0f || !finito(m)) { CFF r = {re, im, 0}; return r; }
+    int k; frexpf(m, &k);
+    CFF r = {ldexpf(re, -k), ldexpf(im, -k), e + k}; return r;
+}
+HD CFF operator+(CFF a, CFF b) {
+    if (a.re == 0.0f && a.im == 0.0f) return b;
+    if (b.re == 0.0f && b.im == 0.0f) return a;
+    if (a.e >= b.e) {
+        float s = ldexpf(1.0f, b.e - a.e);   // 0 si la diferencia de exponentes es enorme
+        return cff_normalizar(a.re + b.re * s, a.im + b.im * s, a.e);
+    }
+    float s = ldexpf(1.0f, a.e - b.e);
+    return cff_normalizar(b.re + a.re * s, b.im + a.im * s, b.e);
+}
+HD CFF operator*(CFF a, CFF b) {
+    return cff_normalizar(fmaf(a.re, b.re, -(a.im * b.im)), fmaf(a.re, b.im, a.im * b.re), a.e + b.e);
+}
+HD CFF operator-(CFF a, CFF b) { b.re = -b.re; b.im = -b.im; return a + b; }
+HD CFF doble(CFF a) { a.e += 1; return a; }
+HD CFF mul_sum(CFF a, CFF b, CFF c) { return a * b + c; }
+HD CFF conjugado(CFF a) { a.im = -a.im; return a; }
+HD CFF a_cff(CFE c) { return cff_normalizar((float)c.re, (float)c.im, c.e); }
+
+template<> HD CFF complejo<CFF>(double re, double im) { return a_cff(cfe_normalizar(re, im, 0)); }
+template<> HD FF  real<FF>(double x) { return ff(x); }
+template<> HD CFF complejo_fe<CFF>(FE re, FE im) { return a_cff(complejo_fe<CFE>(re, im)); }
+
+HD FF   norma2(CFF a) { return ff_normalizar(fmaf(a.re, a.re, a.im * a.im), 2 * a.e); }
+HD FF   modulo(CFF a) { return ff_normalizar(sqrtf(fmaf(a.re, a.re, a.im * a.im)), a.e); }
+HD FF   cota(CFF a)   { return ff_normalizar(1.41421356f * fmaxf(fabsf(a.re), fabsf(a.im)), a.e); }
+HD bool finito(CFF a) { return finito(a.re) && finito(a.im); }
+HD void direccion(CFF a, float* nx, float* ny) { direccion((double)a.re, (double)a.im, nx, ny); }
+
+HD bool menor_pos(FF a, FF b) {
+    if (b.m == 0.0f) return false;
+    if (a.m == 0.0f) return true;
+    if (a.e != b.e) return a.e < b.e;
+    return a.m < b.m;
+}
+HD bool positivo(FF a) { return a.m > 0.0f && finito(a.m); }
+HD bool es_cero(FF a)  { return a.m == 0.0f; }
+
+// ---------------------------------------------------------------------------
 // Fórmulas
 // ---------------------------------------------------------------------------
 // Una fórmula es una estructura con funciones estáticas. Con la órbita de referencia Z y la
@@ -167,9 +250,9 @@ struct Mandelbrot {
     template<class C> HD static C dz_inicial(C)  { return complejo<C>(0.0, 0.0); }
     template<class C> HD static C der_inicial()  { return complejo<C>(0.0, 0.0); }
     // dz' = (2 Z + dz) dz + dc
-    template<class C> HD static C paso(C Z, C dz, C dc) { return (doble(Z) + dz) * dz + dc; }
+    template<class C> HD static C paso(C Z, C dz, C dc) { return mul_sum(doble(Z) + dz, dz, dc); }
     // der' = 2 z der + 1
-    template<class C> HD static C derivada(C z, C der) { return doble(z) * der + complejo<C>(1.0, 0.0); }
+    template<class C> HD static C derivada(C z, C der) { return mul_sum(doble(z), der, complejo<C>(1.0, 0.0)); }
     template<class C> HD static C paso_completo(C z, C c) { return z * z + c; }
     // k es el centro de la vista (la c de la referencia)
     template<class C> HD static C c_completo(C k, C dc) { return k + dc; }
@@ -261,6 +344,18 @@ HD int buscar_bla(const Bla<C, R>* tabla, const int* off, const int* cnt, int ni
 // Qué calcular además de las iteraciones (bits de `salidas`)
 #define SALIDA_SUAVE    1   // iteración continua, para el coloreo suave
 #define SALIDA_DERIVADA 2   // distancia al borde y normal, para la iluminación
+#define DETECTAR_INTERIOR 4 // cortar antes los píxeles que caen en un ciclo (interior del conjunto)
+
+// Detección del interior: se acumula |dz_n / dz_1|^2 = prod |2 z_k|^2. Dentro del conjunto la
+// órbita cae en un ciclo atractor y ese producto tiende a 0; afuera crece. Cuando baja de este
+// umbral el píxel se da por interior (el resultado es el mismo que si llegara a max_iter).
+#define UMBRAL_INTERIOR2 1e-12
+
+// En double el producto puede desbordarse en los primeros pasos (antes de caer en el ciclo):
+// se lo limita, lo que solo puede demorar la detección, nunca adelantarla para un punto exterior.
+HD void limitar(double& r) { if (!(r < 1e290)) r = 1e290; }
+HD void limitar(FE&) {}
+HD void limitar(FF&) {}
 
 // Iteraciones extra después del escape: |z| crece como |z|^(2^k) y el valor suave sale
 // tan preciso como con un radio de escape enorme, sin cambiar el conteo de iteraciones.
@@ -273,30 +368,63 @@ struct Pixel {
     float nx, ny;    // normal unitaria del "relieve" (0 en el interior)
 };
 
+// Estado de un píxel a mitad de camino. La GPU lo guarda entre lanzamientos: cada lanzamiento
+// avanza todos los píxeles una cantidad limitada de pasos (así ninguno dura más de lo que
+// Windows tolera para un kernel, y se puede cancelar entre lanzamientos).
+#define PIXEL_EN_CURSO   0
+#define PIXEL_ESCAPO     1
+#define PIXEL_NO_ESCAPA  2   // llegó a max_iter o se detectó que es interior
+
+template<class C, class R> struct EstadoPixel {
+    C dz, der, z;
+    R z2, der_z2;
+    int m, n, fin;
+};
+
 template<class F, class C, class R>
-HD Pixel iterar_pixel(const C* Z, int largo_orbita,
+HD void iniciar_pixel(EstadoPixel<C, R>& e, const C* Z, C dc)
+{
+    e.dz = F::dz_inicial(dc);
+    e.der = F::template der_inicial<C>();
+    e.z = Z[0] + e.dz;
+    e.z2 = norma2(e.z);              // |z|^2 del paso actual
+    e.der_z2 = real<R>(1.0);         // |dz_n / dz_1|^2, para detectar el interior
+    e.m = 0;                         // posición en la órbita de referencia
+    e.n = 0;                         // iteraciones del píxel
+    e.fin = PIXEL_EN_CURSO;
+}
+
+// Avanza el píxel hasta que termina o hasta hacer `max_pasos` pasos (un paso puede ser un
+// salto del BLA de muchas iteraciones).
+template<class F, class C, class R>
+HD void avanzar_pixel(EstadoPixel<C, R>& e, const C* Z, int largo_orbita,
                       const Bla<C, R>* tabla, const int* off, const int* cnt, int niveles,
-                      C dc, C k, int max_iter, int salidas, R paso_pixel, long long* pasos)
+                      C dc, int max_iter, int salidas, long long max_pasos, long long* pasos)
 {
     const bool con_derivada = (salidas & SALIDA_DERIVADA) != 0;
+    const bool detectar_interior = (salidas & DETECTAR_INTERIOR) != 0;
     const R cuatro = real<R>(4.0);
-    C dz = F::dz_inicial(dc);
-    C der = F::template der_inicial<C>();
-    C z = Z[0] + dz;
-    int m = 0;   // posición en la órbita de referencia
-    int n = 0;   // iteraciones del píxel
-    bool escapo = false;
+    const R umbral_interior = real<R>(UMBRAL_INTERIOR2);
+    C dz = e.dz, der = e.der, z = e.z;
+    R z2 = e.z2, der_z2 = e.der_z2;
+    int m = e.m, n = e.n, fin = PIXEL_EN_CURSO;
     long long p = 0;
-    while (n < max_iter) {
+    while (true) {
+        if (n >= max_iter) { fin = PIXEL_NO_ESCAPA; break; }
+        if (p >= max_pasos) break;
         int nivel = F::tiene_bla ? buscar_bla(tabla, off, cnt, niveles, m, cota(dz), max_iter - n) : -1;
         if (nivel >= 0) {
             const Bla<C, R>& b = tabla[off[nivel] + ((m - 1) >> nivel)];
-            if (con_derivada) der = b.A * der + b.B;
-            dz = b.A * dz + b.B * dc;
+            if (con_derivada) der = mul_sum(b.A, der, b.B);
+            // dz/dz se transforma con A (lo mismo que dz, sin el término de dc)
+            if (detectar_interior) der_z2 = der_z2 * norma2(b.A);
+            dz = mul_sum(b.A, dz, b.B * dc);
             m += 1 << nivel;
             n += 1 << nivel;
         } else {
             if (con_derivada) der = F::derivada(z, der);
+            // Un paso multiplica dz/dz por 2 z (z = 0 solo en el punto de partida: no cuenta)
+            if (detectar_interior && !es_cero(z2)) der_z2 = der_z2 * (cuatro * z2);
             dz = F::paso(Z[m], dz, dc);
             ++m;
             ++n;
@@ -304,8 +432,12 @@ HD Pixel iterar_pixel(const C* Z, int largo_orbita,
         ++p;
 
         z = Z[m] + dz;
-        R z2 = norma2(z);
-        if (menor_pos(cuatro, z2)) { escapo = true; break; }
+        z2 = norma2(z);
+        if (menor_pos(cuatro, z2)) { fin = PIXEL_ESCAPO; break; }
+        if (detectar_interior) {
+            limitar(der_z2);
+            if (menor_pos(der_z2, umbral_interior)) { fin = PIXEL_NO_ESCAPA; break; }   // ciclo atractor
+        }
 
         // Rebasing: si la diferencia respecto del inicio de la órbita es más chica que la actual,
         // se sigue desde ahí (en Mandelbrot Z_0 = 0, así que es |z| < |dz|)
@@ -315,17 +447,25 @@ HD Pixel iterar_pixel(const C* Z, int largo_orbita,
             m = 0;
         }
     }
+    e.dz = dz; e.der = der; e.z = z; e.z2 = z2; e.der_z2 = der_z2; e.m = m; e.n = n; e.fin = fin;
     *pasos += p;
+}
 
+// Resultado de un píxel terminado: iteración, valor suave, distancia y normal.
+template<class F, class C, class R>
+HD Pixel terminar_pixel(const EstadoPixel<C, R>& e, C dc, C k, int max_iter, int salidas, R paso_pixel)
+{
+    const bool con_derivada = (salidas & SALIDA_DERIVADA) != 0;
     Pixel px;
     px.suave = 0.0f; px.distancia = 0.0f; px.nx = 0.0f; px.ny = 0.0f;
-    if (!escapo) {
+    if (e.fin != PIXEL_ESCAPO) {
         px.n = max_iter;
         px.suave = (float)max_iter;
         return px;
     }
-    px.n = n - 1;
+    px.n = e.n - 1;
     if (salidas & (SALIDA_SUAVE | SALIDA_DERIVADA)) {
+        C z = e.z, der = e.der;
         C c = F::c_completo(k, dc);
         for (int i = 0; i < ITERACIONES_EXTRA; ++i) {
             if (con_derivada) der = F::derivada(z, der);
@@ -334,7 +474,7 @@ HD Pixel iterar_pixel(const C* Z, int largo_orbita,
         double ln_z = 0.5 * log(a_double(norma2(z)));      // ln|z|
         if (salidas & SALIDA_SUAVE) {
             // mu = n + extra - log2(ln|z|): continua entre bandas
-            double mu = (double)(n + ITERACIONES_EXTRA) - log2(ln_z);
+            double mu = (double)(e.n + ITERACIONES_EXTRA) - log2(ln_z);
             px.suave = (float)(mu > 0.0 ? mu : 0.0);
         }
         if (con_derivada) {
@@ -346,4 +486,17 @@ HD Pixel iterar_pixel(const C* Z, int largo_orbita,
         }
     }
     return px;
+}
+
+// Un píxel entero, de una vez (la CPU lo usa así).
+template<class F, class C, class R>
+HD Pixel iterar_pixel(const C* Z, int largo_orbita,
+                      const Bla<C, R>* tabla, const int* off, const int* cnt, int niveles,
+                      C dc, C k, int max_iter, int salidas, R paso_pixel, long long* pasos)
+{
+    EstadoPixel<C, R> e;
+    iniciar_pixel<F, C, R>(e, Z, dc);
+    avanzar_pixel<F, C, R>(e, Z, largo_orbita, tabla, off, cnt, niveles, dc, max_iter, salidas,
+                           (long long)max_iter + 1, pasos);
+    return terminar_pixel<F, C, R>(e, dc, k, max_iter, salidas, paso_pixel);
 }

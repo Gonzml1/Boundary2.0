@@ -62,7 +62,7 @@ julia_cpp = free_julia = None
 burning_ship_cpp = free_burning_ship = None
 circulo_cpp = free_circulo = None
 pert_crear = pert_parametro = pert_largo = pert_liberar = pert_preparar_bla = pert_render = None
-pert_bytes_orbita = pert_bytes_bla = pert_exportar = None
+pert_bytes_orbita = pert_bytes_bla = pert_exportar = pert_tam_estado = None
 calcular_mandelbrot_gmp_puro = None
 
 # --- Instanciación de backends específicos ---
@@ -119,6 +119,7 @@ if _perturbacion:
         ctypes.c_longlong
     )
     pert_bytes_orbita = _perturbacion.wrap_func('pert_bytes_orbita', [ctypes.c_void_p], ctypes.c_longlong)
+    pert_tam_estado = _perturbacion.wrap_func('pert_tam_estado', [ctypes.c_int], ctypes.c_int)
     pert_bytes_bla = _perturbacion.wrap_func('pert_bytes_bla', [ctypes.c_void_p], ctypes.c_longlong)
     _BYTES = np.ctypeslib.ndpointer(dtype=np.uint8, ndim=1, flags='C_CONTIGUOUS')
     _INTS = np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS')

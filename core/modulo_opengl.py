@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import QOpenGLWidget, QRubberBand
 from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect
 from OpenGL.GL import *
 
-from core.modulo_de_calculo_fractales import RenderCancelado
+from core.modulo_de_calculo_fractales import RenderCancelado, variante_rapida
 from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, PedidoRender, OpcionesColor
 
@@ -238,8 +238,10 @@ class MandelbrotWidget(QOpenGLWidget):
         divisor = NIVELES_CALIDAD[nivel]
         pedido = self.pedido_actual(max(1, ancho // divisor), max(1, alto // divisor))
         if nivel != NIVEL_FINAL:
-            # El antialiasing solo a resolución completa: en las previas sería trabajo tirado
-            pedido = replace(pedido, opciones=replace(pedido.opciones, antialiasing=False))
+            # Las versiones previas son borrosas: sin antialiasing y con la variante en float del
+            # método (mucho más rápida en GPU). La imagen final siempre usa el método elegido.
+            pedido = replace(pedido, opciones=replace(pedido.opciones, antialiasing=False),
+                             tipo_calculo=variante_rapida(pedido.tipo_fractal, pedido.tipo_calculo))
         self._hilo.pedir(PedidoPantalla(self._version, nivel, pedido))
 
     def _al_terminar_render(self, pp: PedidoPantalla, imagen) -> None:
