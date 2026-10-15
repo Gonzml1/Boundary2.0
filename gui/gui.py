@@ -103,9 +103,9 @@ class WorkerVideo(QThread):
             if self.isInterruptionRequested():
                 self.terminado.emit(f"Video cancelado: quedaron {i} cuadros en {self.carpeta}")
                 return
-            # Los cuadros alejados usan menos iteraciones, pero se colorean contra el máximo final
+            # Mismas iteraciones (y colores) que la vista actual; solo cambia la región
             pedido = replace(p, xmin=cuadro.xmin, xmax=cuadro.xmax, ymin=cuadro.ymin, ymax=cuadro.ymax,
-                             max_iter=cuadro.max_iter, max_iter_color=p.max_iter)
+                             max_iter=cuadro.max_iter)
             imagen = renderizar(motor, pedido)
             _guardar_png(os.path.join(self.carpeta, f"frame_{i:05d}.png"), imagen.rgb)
             self.progreso.emit(i + 1, self.cuadros)

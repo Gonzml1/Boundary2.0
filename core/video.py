@@ -13,7 +13,6 @@ log = logging.getLogger(__name__)
 CENTRO_INICIAL = (Decimal('-0.5'), Decimal('0'))
 ANCHO_MINIMO_INICIAL = Decimal('3.2')
 ALTO_MINIMO_INICIAL = Decimal('2.6')
-ITER_INICIAL = 256
 
 
 class Cuadro(NamedTuple):
@@ -32,8 +31,8 @@ def planificar_zoom(xmin: Decimal, xmax: Decimal, ymin: Decimal, ymax: Decimal,
       factor), así el zoom se ve a velocidad constante.
     - El destino arranca donde cae en la vista inicial y se desplaza de a poco hasta el centro
       de la pantalla, donde queda exacto en el último cuadro.
-    - Las iteraciones crecen con la profundidad: los cuadros alejados no necesitan las mismas
-      iteraciones que el zoom profundo, y así salen mucho más rápido.
+    - Todos los cuadros usan las mismas iteraciones que la vista final, así ninguna parte del
+      recorrido queda mal resuelta por falta de iteraciones.
     - El alto se ajusta a la relación de aspecto de la resolución del video.
     """
     aspecto = Decimal(alto_px) / Decimal(ancho_px)
@@ -43,7 +42,6 @@ def planificar_zoom(xmin: Decimal, xmax: Decimal, ymin: Decimal, ymax: Decimal,
     ancho_0 = max(ANCHO_MINIMO_INICIAL, ALTO_MINIMO_INICIAL / aspecto, ancho_f)
 
     log_razon = (ancho_f / ancho_0).ln()          # <= 0
-    iter_0 = min(ITER_INICIAL, max_iter)
     px_0, py_0 = (cx_f - cx_0) / ancho_0, (cy_f - cy_0) / ancho_0
     for i in range(cuadros):
         t = Decimal(i) / Decimal(max(1, cuadros - 1))
@@ -56,10 +54,7 @@ def planificar_zoom(xmin: Decimal, xmax: Decimal, ymin: Decimal, ymax: Decimal,
         cy = cy_f - py_0 * (1 - t) * ancho
         medio_ancho = ancho / 2
         medio_alto = ancho * aspecto / 2
-        # Profundidad relativa (0..1) para escalar las iteraciones
-        profundidad = float(t)
-        iters = round(iter_0 * (max_iter / iter_0) ** profundidad)
-        yield Cuadro(cx - medio_ancho, cx + medio_ancho, cy - medio_alto, cy + medio_alto, iters)
+        yield Cuadro(cx - medio_ancho, cx + medio_ancho, cy - medio_alto, cy + medio_alto, max_iter)
 
 
 def crear_carpeta_video(base: str) -> str:
