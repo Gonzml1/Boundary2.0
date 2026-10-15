@@ -2,6 +2,7 @@ numpy>=2.0
 PyQt5>=5.15
 PyOpenGL>=3.1
 matplotlib>=3.8
+Pillow>=10
 
 # Opcional: backends GPU (placa NVIDIA). Elegí el paquete que corresponda a tu versión de CUDA,
 # por ejemplo cupy-cuda12x o cupy-cuda13x. Sin CuPy la app funciona igual con los backends de CPU.

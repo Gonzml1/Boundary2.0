@@ -3,13 +3,13 @@ import threading
 from dataclasses import replace
 from decimal import Decimal
 
-from PyQt5.QtWidgets import QOpenGLWidget
-from PyQt5.QtCore import Qt, pyqtSignal, QThread
+from PyQt5.QtWidgets import QOpenGLWidget, QRubberBand
+from PyQt5.QtCore import Qt, pyqtSignal, QThread, QTimer, QRect
 from OpenGL.GL import *
 
-from core.modulo_de_calculo_fractales import calculos_mandelbrot
+from core.modulo_de_calculo_fractales import RenderCancelado
 from core.paletas import PALETTE_REGISTRY
-from core.render import renderizar, PedidoRender, OpcionesColor
+from core.render import Renderizador, PedidoRender, OpcionesColor
 
 log = logging.getLogger(__name__)
 
@@ -21,47 +21,73 @@ VISTA_INICIAL = (Decimal('-2.0'), Decimal('1.2'), Decimal('-0.9'), Decimal('0.9'
 NIVELES_CALIDAD = (8, 2, 1)
 NIVEL_FINAL = len(NIVELES_CALIDAD) - 1
 
+# Parámetros de configurar() que solo cambian el coloreo: se recolorea sin recalcular
+PARAMETROS_SOLO_COLOR = {"palette_index", "clase_equiv"}
+OPCIONES_SOLO_COLOR = {"angulo_luz", "altura_luz", "interior"}
+# Parámetros que no cambian la imagen
+PARAMETROS_SIN_RENDER = {"zoom_in", "zoom_out"}
+
+# Historial de vistas: una vista entra al historial cuando queda quieta este tiempo
+MS_HISTORIAL = 600
+MAX_HISTORIAL = 200
+# Arrastre mínimo (en píxeles) para que un clic izquierdo sea zoom por rectángulo
+ARRASTRE_MINIMO = 6
+
 
 class HiloRender(QThread):
-    """Renderiza en segundo plano. Atiende siempre el pedido más reciente: si llegan varios
-    mientras está ocupado, los viejos se descartan."""
+    """Renderiza en segundo plano. Atiende siempre el pedido más reciente: si llega uno nuevo
+    mientras calcula, el cálculo en curso se abandona y los pedidos viejos se descartan."""
     listo = pyqtSignal(object, object)    # (PedidoPantalla, ImagenRender)
     fallo = pyqtSignal(object, str)       # (PedidoPantalla, mensaje)
+    empezo = pyqtSignal(object)           # (PedidoPantalla)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._candado = threading.Lock()
         self._hay_pedido = threading.Event()
         self._pendiente = None
+        self._ocupado = False
         self._salir = False
+        # Renderizador propio del hilo: guarda estado (cachés de órbita y de resultados)
+        self._renderizador = Renderizador()
 
     def pedir(self, pedido_pantalla) -> None:
         with self._candado:
             self._pendiente = pedido_pantalla
+            if self._ocupado:
+                self._renderizador.cancelar()
         self._hay_pedido.set()
 
     def detener(self) -> None:
         self._salir = True
+        self._renderizador.cancelar()
         self._hay_pedido.set()
         self.wait()
 
     def run(self):
-        # Motor propio del hilo: el motor guarda estado (cachés de órbita) y no se comparte
-        motor = calculos_mandelbrot(*VISTA_INICIAL, 1, 1, 1, "", "")
         while True:
             self._hay_pedido.wait()
             with self._candado:
                 pp, self._pendiente = self._pendiente, None
                 self._hay_pedido.clear()
+                if pp is not None:
+                    self._ocupado = True
+                    self._renderizador.reiniciar_cancelacion()
             if self._salir:
                 return
             if pp is None:
                 continue
+            self.empezo.emit(pp)
             try:
-                self.listo.emit(pp, renderizar(motor, pp.pedido))
+                self.listo.emit(pp, self._renderizador.renderizar(pp.pedido))
+            except RenderCancelado:
+                log.debug("Render abandonado: llegó un pedido más nuevo")
             except Exception as e:
                 log.exception("Fallo calculando '%s / %s'", pp.pedido.tipo_fractal, pp.pedido.tipo_calculo)
                 self.fallo.emit(pp, str(e))
+            finally:
+                with self._candado:
+                    self._ocupado = False
 
 
 class PedidoPantalla:
@@ -74,13 +100,15 @@ class PedidoPantalla:
 
 class MandelbrotWidget(QOpenGLWidget):
     # --- SEÑALES MVC ---
-    coordenadas_raton_cambiadas = pyqtSignal(float, float)
+    # Coordenadas del cursor como texto, con los dígitos que tienen sentido a esta profundidad
+    coordenadas_raton_cambiadas = pyqtSignal(str, str)
     # Los límites viajan como texto para no perder precisión en zooms profundos
     limites_zoom_cambiados = pyqtSignal(str, str, str, str)
     parametros_matematicos_cambiados = pyqtSignal(int, int)    # max_iter, clase_equiv
     paleta_cambiada = pyqtSignal(int)
-    # segundos, opciones aplicadas, ancho, alto, ¿es la calidad final?
-    render_terminado = pyqtSignal(float, object, int, int, bool)
+    # segundos, opciones aplicadas, ancho, alto, ¿es la calidad final?, ¿se recalculó?
+    render_terminado = pyqtSignal(float, object, int, int, bool, bool)
+    render_empezado = pyqtSignal()
     render_fallido = pyqtSignal(str)
     modo_completo_cambiado = pyqtSignal(bool)
 
@@ -103,6 +131,18 @@ class MandelbrotWidget(QOpenGLWidget):
 
         self.dragging = False
         self.last_pos = None
+        # Zoom por rectángulo con el botón izquierdo
+        self._inicio_izq = None
+        self._rectangulo = QRubberBand(QRubberBand.Rectangle, self)
+
+        # Historial de vistas (atrás / adelante)
+        self._historial = [VISTA_INICIAL]
+        self._pos_historial = 0
+        self._navegando_historial = False
+        self._timer_historial = QTimer(self)
+        self._timer_historial.setSingleShot(True)
+        self._timer_historial.setInterval(MS_HISTORIAL)
+        self._timer_historial.timeout.connect(self._consolidar_historial)
 
         # Versión de la vista: sube con cada cambio. Solo los resultados de la versión actual
         # disparan el siguiente nivel de calidad.
@@ -118,6 +158,7 @@ class MandelbrotWidget(QOpenGLWidget):
         self._hilo = HiloRender(self)
         self._hilo.listo.connect(self._al_terminar_render)
         self._hilo.fallo.connect(self._al_fallar_render)
+        self._hilo.empezo.connect(self._al_empezar_render)
         self._hilo.start()
 
     # ============================================================
@@ -125,12 +166,28 @@ class MandelbrotWidget(QOpenGLWidget):
     # ============================================================
 
     def configurar(self, **parametros) -> None:
-        """Cambia parámetros que no son la vista (max_iter, tipo_calculo, opciones, ...) y re-renderiza."""
+        """Cambia parámetros que no son la vista (max_iter, tipo_calculo, opciones, ...).
+        Si no cambió nada no hace nada; si solo cambió el coloreo, recolorea sin recalcular."""
+        cambios = set()
         for nombre, valor in parametros.items():
             if not hasattr(self, nombre):
                 raise AttributeError(nombre)
+            anterior = getattr(self, nombre)
+            if anterior == valor:
+                continue
+            if nombre == "opciones":
+                campos = {c for c in valor.__dataclass_fields__ if getattr(anterior, c) != getattr(valor, c)}
+                cambios.add("opciones_color" if campos <= OPCIONES_SOLO_COLOR else "opciones")
+            else:
+                cambios.add(nombre)
             setattr(self, nombre, valor)
-        self.solicitar_render()
+        cambios -= PARAMETROS_SIN_RENDER
+        if not cambios:
+            return
+        if cambios <= PARAMETROS_SOLO_COLOR | {"opciones_color"}:
+            self.solicitar_recoloreo()
+        else:
+            self.solicitar_render()
 
     def fijar_vista(self, xmin: Decimal, xmax: Decimal, ymin: Decimal, ymax: Decimal) -> None:
         self.xmin, self.xmax, self.ymin, self.ymax = xmin, xmax, ymin, ymax
@@ -165,6 +222,14 @@ class MandelbrotWidget(QOpenGLWidget):
         self._pedir_nivel(NIVEL_FINAL if self.modo_completo else 0)
         self.update()      # reproyecta la imagen vieja mientras tanto
 
+    def solicitar_recoloreo(self) -> None:
+        """Pide directo la imagen final: si solo cambió el coloreo, el hilo de render reusa el
+        cálculo anterior y la imagen sale al instante (sin pasar por las versiones borrosas)."""
+        if not self.tipo_fractal or not self.tipo_calculo:
+            return
+        self._version += 1
+        self._pedir_nivel(NIVEL_FINAL)
+
     # Compatibilidad con el nombre anterior
     interaccion_rapida = solicitar_render
 
@@ -182,10 +247,15 @@ class MandelbrotWidget(QOpenGLWidget):
         self._imagen_pendiente = imagen.rgb
         self._rect_imagen = (p.xmin, p.xmax, p.ymin, p.ymax)
         final = pp.nivel == NIVEL_FINAL
-        self.render_terminado.emit(imagen.segundos, imagen.aplicadas, p.ancho, p.alto, final)
+        self.render_terminado.emit(imagen.segundos, imagen.aplicadas, p.ancho, p.alto, final,
+                                   imagen.recalculado)
         if pp.version == self._version and not final:
             self._pedir_nivel(pp.nivel + 1)
         self.update()
+
+    def _al_empezar_render(self, pp: PedidoPantalla) -> None:
+        if pp.version == self._version:
+            self.render_empezado.emit()
 
     def _al_fallar_render(self, pp: PedidoPantalla, mensaje: str) -> None:
         if pp.version == self._version:
@@ -213,7 +283,7 @@ class MandelbrotWidget(QOpenGLWidget):
     def _cambiar_paleta(self, paso: int):
         self.palette_index = (self.palette_index + paso) % len(PALETTE_REGISTRY)
         self.paleta_cambiada.emit(self.palette_index)
-        self.solicitar_render()
+        self.solicitar_recoloreo()
 
     # ============================================================
     #                    COORDENADAS
@@ -239,6 +309,57 @@ class MandelbrotWidget(QOpenGLWidget):
 
     def _emitir_limites(self):
         self.limites_zoom_cambiados.emit(*self.limites_como_texto())
+        if not self._navegando_historial:
+            self._timer_historial.start()     # entra al historial cuando la vista quede quieta
+
+    def ancho_vista(self) -> Decimal:
+        return self.xmax - self.xmin
+
+    def paso_pixel(self) -> Decimal:
+        """Tamaño de un píxel en el plano complejo."""
+        return self.ancho_vista() / Decimal(max(1, self.width()))
+
+    def coordenadas_como_texto(self, real: Decimal, imag: Decimal) -> tuple[str, str]:
+        """Con los decimales justos para distinguir píxeles vecinos (más 2 de margen)."""
+        paso = self.paso_pixel()
+        decimales = max(6, 2 - paso.adjusted()) if paso else 6
+        return format(real, f'.{decimales}f'), format(imag, f'.{decimales}f')
+
+    # --- historial ---
+    def _vista(self) -> tuple:
+        return (self.xmin, self.xmax, self.ymin, self.ymax)
+
+    def _consolidar_historial(self) -> None:
+        self._timer_historial.stop()
+        vista = self._vista()
+        if vista == self._historial[self._pos_historial]:
+            return
+        del self._historial[self._pos_historial + 1:]
+        self._historial.append(vista)
+        if len(self._historial) > MAX_HISTORIAL:
+            del self._historial[0]
+        self._pos_historial = len(self._historial) - 1
+
+    def atras(self) -> None:
+        """Vuelve a la vista anterior del historial."""
+        if self._timer_historial.isActive():
+            self._consolidar_historial()
+        if self._pos_historial > 0:
+            self._ir_a_historial(self._pos_historial - 1)
+
+    def adelante(self) -> None:
+        if self._timer_historial.isActive():
+            self._consolidar_historial()
+        if self._pos_historial < len(self._historial) - 1:
+            self._ir_a_historial(self._pos_historial + 1)
+
+    def _ir_a_historial(self, posicion: int) -> None:
+        self._pos_historial = posicion
+        self._navegando_historial = True
+        try:
+            self.fijar_vista(*self._historial[posicion])
+        finally:
+            self._navegando_historial = False
 
     def limites_como_texto(self) -> tuple[str, str, str, str]:
         # 20 dígitos más allá del tamaño de la vista: suficiente para no perder nada al releerlos
@@ -311,26 +432,45 @@ class MandelbrotWidget(QOpenGLWidget):
     # ==================== EVENTOS DE MOUSE Y TECLADO ====================
 
     def wheelEvent(self, event):
+        # Hacia el cursor: el punto bajo el mouse queda quieto
         zoom = 0.9 if event.angleDelta().y() > 0 else 1.1
-        self._aplicar_zoom(zoom)
+        pos = event.position()
+        self._centrar_y_zoom(pos.x(), self.height() - pos.y(), zoom)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._centrar_y_zoom(event.x(), self.height() - event.y(), self.zoom_in)
+            # Si se arrastra es zoom por rectángulo; si no, al soltar es el zoom de siempre
+            self._inicio_izq = event.pos()
         elif event.button() == Qt.RightButton:
             self._centrar_y_zoom(event.x(), self.height() - event.y(), self.zoom_out)
         elif event.button() == Qt.MiddleButton:
             self.dragging = True
             self.last_pos = event.pos()
+        elif event.button() == Qt.XButton1:      # botón "atrás" del mouse
+            self.atras()
+        elif event.button() == Qt.XButton2:
+            self.adelante()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton:
             self.dragging = False
+        elif event.button() == Qt.LeftButton and self._inicio_izq is not None:
+            inicio, self._inicio_izq = self._inicio_izq, None
+            if self._rectangulo.isVisible():
+                self._rectangulo.hide()
+                self._zoom_a_rectangulo(QRect(inicio, event.pos()).normalized())
+            else:
+                self._centrar_y_zoom(inicio.x(), self.height() - inicio.y(), self.zoom_in)
 
     def mouseMoveEvent(self, event):
         x, y = event.x(), event.y()
         real, imag = self.pixel_a_complejo(x, y)
-        self.coordenadas_raton_cambiadas.emit(float(real), float(imag))
+        self.coordenadas_raton_cambiadas.emit(*self.coordenadas_como_texto(real, imag))
+
+        if self._inicio_izq is not None and event.buttons() & Qt.LeftButton:
+            if (event.pos() - self._inicio_izq).manhattanLength() >= ARRASTRE_MINIMO:
+                self._rectangulo.setGeometry(QRect(self._inicio_izq, event.pos()).normalized())
+                self._rectangulo.show()
 
         if self.dragging:
             c0_real, c0_imag = self.pixel_a_complejo(self.last_pos.x(), self.last_pos.y())
@@ -343,6 +483,21 @@ class MandelbrotWidget(QOpenGLWidget):
             self.last_pos = event.pos()
             self._emitir_limites()
             self.solicitar_render()
+
+    def _zoom_a_rectangulo(self, rect: QRect) -> None:
+        """Lleva la vista al rectángulo marcado, agrandándolo lo justo para respetar el aspecto."""
+        if rect.width() < 2 or rect.height() < 2:
+            return
+        re0, im_arriba = self.pixel_a_complejo(rect.left(), rect.top())
+        re1, im_abajo = self.pixel_a_complejo(rect.right() + 1, rect.bottom() + 1)
+        cx, cy = (re0 + re1) / 2, (im_arriba + im_abajo) / 2
+        ancho, alto = re1 - re0, im_arriba - im_abajo
+        aspecto = Decimal(max(1, self.width())) / Decimal(max(1, self.height()))
+        if ancho / alto < aspecto:
+            ancho = alto * aspecto
+        else:
+            alto = ancho / aspecto
+        self.fijar_vista(cx - ancho / 2, cx + ancho / 2, cy - alto / 2, cy + alto / 2)
 
     def _aplicar_zoom(self, factor):
         factor_dec = Decimal(str(factor))
@@ -407,6 +562,12 @@ class MandelbrotWidget(QOpenGLWidget):
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
         elif tecla == Qt.Key_Q:
             self.toggle_modo_completo()
+            return
+        elif tecla == Qt.Key_Backspace:
+            if event.modifiers() & Qt.ShiftModifier:
+                self.adelante()
+            else:
+                self.atras()
             return
         else:
             super().keyPressEvent(event)

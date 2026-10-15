@@ -37,16 +37,34 @@ python iniciador.py --debug   # además muestra el tiempo de cada render
 Si falta la GPU o alguna DLL, la app arranca igual: esos métodos no aparecen en el combo
 y el log dice qué se omitió.
 
+`F1` muestra todos los atajos dentro de la app.
+
 | Control | Acción |
 |---|---|
-| Rueda / `+` `-` | Zoom |
-| Click izquierdo / derecho | Centrar y acercar / alejar |
-| Click del medio + arrastrar, flechas, WASD | Mover |
+| Rueda del mouse | Zoom hacia el cursor (el punto bajo el mouse queda quieto) |
+| Clic izquierdo / derecho | Acercar / alejar en ese punto |
+| Arrastrar con el botón izquierdo | Zoom al rectángulo marcado |
+| Arrastrar con el del medio, flechas, WASD | Mover |
+| `+` / `-` | Acercar / alejar al centro |
+| `Backspace`, `Alt+Izquierda`, botón "atrás" del mouse | Vista anterior |
+| `Shift+Backspace`, `Alt+Derecha` | Vista siguiente |
 | `P` / `O` | Paleta siguiente / anterior |
 | `G` / `H` | Duplicar / dividir iteraciones |
 | `B` / `N` | Duplicar / dividir clase de equivalencia de la paleta |
 | `Q` | Modo foto completa: cada imagen se calcula entera a resolución completa y recién ahí se muestra (sin versiones previas borrosas ni la imagen anterior corrida). Apagado, el render es progresivo |
 | `R` | Volver a la vista inicial |
+
+La barra de estado muestra el tamaño de la vista (`zoom 3.2e-145`), cuánto lleva calculando un
+render largo, y un aviso si el método elegido no tiene precisión para esa profundidad. Las coordenadas
+del cursor se muestran con todos los dígitos que corresponden a la profundidad.
+
+Si se mueve la vista mientras se calcula, el cálculo en curso se abandona y arranca el nuevo. Cambiar
+solo el coloreo (paleta, ciclo, luz o color del interior) no recalcula el fractal: se recolorea el
+último cálculo, y volver a una vista reciente también sale del caché.
+
+La app recuerda entre sesiones el tamaño de la ventana, el fractal y el método, la paleta, las opciones
+de color y las últimas carpetas usadas. Al arrancar por primera vez elige `perturbacion_gpu` (o
+`perturbacion_cpu` si no hay GPU), que son los métodos que soportan todas las opciones.
 
 ### Opciones de color (panel "4. COLOR")
 
@@ -61,8 +79,23 @@ Las tres se activan y desactivan por separado. Funcionan con los métodos de per
   distancia al borde, que oscurece lo que está a menos de un píxel del conjunto.
 - **Antialiasing (2x2)**: renderiza al doble de resolución y promedia. Cuesta 4 veces más, así que en
   pantalla se aplica solo a la calidad final.
+- **Interior**: el color de los puntos que pertenecen al conjunto. Puede ser el de la paleta, negro,
+  blanco o uno a elección.
 
 Las opciones se respetan igual en pantalla, en "Guardar imagen" y en el video.
+
+### Video de zoom (panel "6. EXPORTAR")
+
+Genera un zoom que arranca con el fractal entero y termina exactamente en la vista actual. En el
+diálogo se elige la resolución, la duración, los fotogramas por segundo, si el zoom arranca y frena
+suave, y cuántos segundos queda quieto en la última imagen. Todos los cuadros usan las iteraciones de
+la vista actual.
+
+- **Vista previa**: reproduce el recorrido a baja resolución en unos segundos, antes de renderizar.
+- Cada video se guarda en una carpeta nueva (`zoom_AAAA-MM-DD_HH-MM-SS`) con `frame_1.png`,
+  `frame_2.png`, ... y, si está instalado ffmpeg, el `zoom.mp4`. El progreso muestra cuánto falta.
+- **Continuar video…**: si se cancela (o se corta la luz), se puede retomar eligiendo su carpeta. Los
+  cuadros que ya están no se recalculan: la carpeta guarda todos los parámetros en `video.json`.
 
 ### Favoritos
 
@@ -75,6 +108,7 @@ archivo no se versiona.
 ```
 iniciador.py                         punto de entrada
 gui/gui.py                           ventana principal: conecta los controles con el widget
+gui/dialogos.py                      diálogos del video (configuración, vista previa, progreso) y atajos
 gui/MandelbrotGUI.ui                 la interfaz (Qt Designer); MandelbrotGUI.py se genera de acá
 gui/tema_oscuro.py                   tema visual
 core/modulo_opengl.py                widget OpenGL + hilo de render (calidad progresiva)
@@ -83,7 +117,7 @@ core/modulo_de_calculo_fractales.py  motor de cálculo y registro de fractales
 core/funciones_kernel.py             kernels CuPy
 core/backend_cpp.py                  carga de las DLL
 core/paletas.py                      paletas de color
-core/video.py                        planificación del video de zoom
+core/video.py                        planificación del video de zoom y su plan guardado (video.json)
 core/favoritos.py                    ubicaciones guardadas
 codigos_cpp/                         fuentes C++ (perturbacion_core.h: núcleo compartido CPU/GPU)
 ```

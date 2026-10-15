@@ -94,10 +94,11 @@ if _perturbacion:
     # Ver codigos_cpp/perturbacion.cpp. Los números que pueden ser muy chicos (dc, pasos)
     # viajan como (mantisa double, exponente int) para no perderlos por underflow.
     _FE = [ctypes.c_double, ctypes.c_int]
-    # (formula, c_re, c_im, k_re, k_im, max_iter, bits) -> handle
+    _BANDERA = ctypes.POINTER(ctypes.c_int)
+    # (formula, c_re, c_im, k_re, k_im, max_iter, bits, cancelar) -> handle (NULL si se canceló)
     pert_crear = _perturbacion.wrap_func(
         'pert_crear', [ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
-                       ctypes.c_int, ctypes.c_int], ctypes.c_void_p
+                       ctypes.c_int, ctypes.c_int, _BANDERA], ctypes.c_void_p
     )
     pert_parametro = _perturbacion.wrap_func(
         'pert_parametro', [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)], None
@@ -109,12 +110,12 @@ if _perturbacion:
     )
     _MATRIZ_F32 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS')
     # (h, dc_x_base, dc_y_base, step_x, step_y, paso_pixel, width, height, max_iter, salidas,
-    #  iter, suave, distancia, nx, ny) -> pasos
+    #  iter, suave, distancia, nx, ny, cancelar) -> pasos
     pert_render = _perturbacion.wrap_func(
         'pert_render',
         [ctypes.c_void_p, *_FE, *_FE, *_FE, *_FE, *_FE,
          ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-         _MATRIZ_I32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32],
+         _MATRIZ_I32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _BANDERA],
         ctypes.c_longlong
     )
     pert_bytes_orbita = _perturbacion.wrap_func('pert_bytes_orbita', [ctypes.c_void_p], ctypes.c_longlong)

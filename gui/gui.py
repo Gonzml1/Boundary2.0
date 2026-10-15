@@ -1,118 +1,33 @@
-import os
+import time
 import logging
-from dataclasses import replace, asdict
+from dataclasses import asdict
 from decimal import Decimal, InvalidOperation
 
-import numpy as np
-import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import QMainWindow, QFileDialog, QInputDialog, QMessageBox
+from PyQt5.QtCore import Qt, QSettings, QTimer
+from PyQt5.QtGui import QColor, QKeySequence
+from PyQt5.QtWidgets import QMainWindow, QFileDialog, QInputDialog, QMessageBox, QShortcut
 
 import gui.tema_oscuro as ts
 from gui.MandelbrotGUI import Ui_Boundary
-from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY, calculos_mandelbrot
-from core.modulo_opengl import MandelbrotWidget, VISTA_INICIAL
+from gui.dialogos import (DialogoVideo, DialogoProgresoVideo, WorkerVideo, pedido_desde_plan,
+                          mostrar_atajos, formatear_duracion)
+from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY, METODOS_PROFUNDOS, LIMITE_DOUBLE
+from core.modulo_opengl import MandelbrotWidget
 from core.paletas import PALETTE_REGISTRY
-from core.render import renderizar, PedidoRender, OpcionesColor
-from core.video import planificar_zoom, armar_mp4, crear_carpeta_video
+from core.render import Renderizador, OpcionesColor, guardar_imagen
+from core.video import crear_carpeta_video, cargar_plan
 from core import favoritos
 
 log = logging.getLogger(__name__)
 
-RESOLUCIONES = {"Actual": None, "Full HD (1920x1080)": (1920, 1080), "4K (3840x2160)": (3840, 2160)}
-
-
-def _guardar_png(ruta: str, rgb: np.ndarray) -> None:
-    # La fila 0 de la imagen es ymin: se invierte para que no salga al revés
-    plt.imsave(ruta, rgb[::-1])
-
-
-class DialogoProgresoVideo(QtWidgets.QDialog):
-    """Progreso del video: mensaje, barra y, abajo, cuántas imágenes van y el botón Cancelar."""
-    cancelado = pyqtSignal()
-
-    def __init__(self, texto: str, total: int, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Renderizando video")
-        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
-        self._terminado = False
-
-        mensaje = QtWidgets.QLabel(texto)
-        mensaje.setAlignment(Qt.AlignCenter)
-        self.barra = QtWidgets.QProgressBar()
-        self.barra.setMinimumWidth(320)
-        self.contador = QtWidgets.QLabel()
-        self.boton_cancelar = QtWidgets.QPushButton("Cancelar")
-        self.boton_cancelar.clicked.connect(self._cancelar)
-
-        abajo = QtWidgets.QHBoxLayout()
-        abajo.addWidget(self.contador)
-        abajo.addStretch()
-        abajo.addWidget(self.boton_cancelar)
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.addWidget(mensaje)
-        layout.addWidget(self.barra)
-        layout.addLayout(abajo)
-        self.actualizar(0, total)
-
-    def actualizar(self, actual: int, total: int) -> None:
-        self.barra.setMaximum(total)
-        self.barra.setValue(actual)
-        self.contador.setText(f"{actual}/{total} imágenes")
-
-    def _cancelar(self) -> None:
-        # El hilo termina el cuadro en curso y después avisa; recién ahí se cierra el diálogo
-        self.boton_cancelar.setEnabled(False)
-        self.contador.setText("Cancelando…")
-        self.cancelado.emit()
-
-    def reject(self):
-        # Esc o la X de la ventana cancelan el video, igual que el botón
-        if self._terminado:
-            super().reject()
-        else:
-            self._cancelar()
-
-    def terminar(self) -> None:
-        self._terminado = True
-        self.accept()
-
-
-# --- HILO EN SEGUNDO PLANO PARA EL VIDEO ---
-class WorkerVideo(QThread):
-    """Renderiza un zoom desde el fractal entero hasta la vista del pedido (ver core/video.py)."""
-    progreso = pyqtSignal(int, int)  # frame_actual, total_frames
-    terminado = pyqtSignal(str)      # mensaje final
-
-    def __init__(self, pedido: PedidoRender, carpeta: str, fps: int, duracion: float):
-        super().__init__()
-        self.pedido = pedido
-        self.carpeta = carpeta
-        self.fps = fps
-        self.cuadros = max(1, round(fps * duracion))
-
-    def run(self):
-        p = self.pedido
-        # Motor EXCLUSIVO para este hilo, para no pisarse con el de la pantalla
-        motor = calculos_mandelbrot(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto,
-                                    p.max_iter, p.tipo_calculo, p.tipo_fractal)
-        plan = planificar_zoom(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto, self.cuadros, p.max_iter)
-
-        for i, cuadro in enumerate(plan):
-            if self.isInterruptionRequested():
-                self.terminado.emit(f"Video cancelado: quedaron {i} cuadros en {self.carpeta}")
-                return
-            # Mismas iteraciones (y colores) que la vista actual; solo cambia la región
-            pedido = replace(p, xmin=cuadro.xmin, xmax=cuadro.xmax, ymin=cuadro.ymin, ymax=cuadro.ymax,
-                             max_iter=cuadro.max_iter)
-            imagen = renderizar(motor, pedido)
-            # frame_1.png, frame_2.png, ... (sin ceros adelante, empezando en 1)
-            _guardar_png(os.path.join(self.carpeta, f"frame_{i + 1}.png"), imagen.rgb)
-            self.progreso.emit(i + 1, self.cuadros)
-
-        mp4 = armar_mp4(self.carpeta, self.fps)
-        self.terminado.emit(f"Video listo: {mp4}" if mp4 else f"Cuadros listos en {self.carpeta}")
+RESOLUCIONES_IMAGEN = {"Actual": None, "Full HD (1920x1080)": (1920, 1080), "4K (3840x2160)": (3840, 2160)}
+# Métodos preferidos al arrancar (el primero disponible): son los que soportan todas las opciones
+METODOS_PREFERIDOS = ("perturbacion_gpu", "perturbacion_cpu")
+# Opciones del color del interior: nombre -> color (None = el de la paleta; "elegir" = diálogo)
+COLORES_INTERIOR = {"Color de la paleta": None, "Negro": (0, 0, 0), "Blanco": (255, 255, 255),
+                    "Personalizado…": "elegir"}
+SEGUNDOS_ANTES_DE_MOSTRAR_CALCULO = 0.5
 
 
 class MainWindow(QMainWindow):
@@ -121,6 +36,8 @@ class MainWindow(QMainWindow):
         self.ui = Ui_Boundary()
         self.ui.setupUi(self)
         ts.tema_oscuro(QtWidgets.QApplication.instance())
+        # Preferencias del usuario (en Windows quedan en el registro, HKCU\Software\ABoundary)
+        self.ajustes = QSettings("ABoundary", "ABoundary")
 
         # La vista OpenGL ocupa el contenedor de la izquierda
         self.mandelbrot = MandelbrotWidget(self.ui.contenedor_grafico)
@@ -129,19 +46,66 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.mandelbrot)
 
         self.favoritos = favoritos.cargar()
+        self._color_personalizado = (40, 40, 40)
+        self._indice_interior = 0
+        self._inicio_calculo = None
+        self.worker = None
 
-        # Indicador fijo del modo de render, a la derecha de la barra de estado
-        self.indicador_modo = QtWidgets.QLabel()
-        self.statusBar().addPermanentWidget(self.indicador_modo)
-        self._al_cambiar_modo_completo(False)
-
+        self._crear_barra_de_estado()
         self.inicializar_combos()
+        self._restaurar_preferencias()
         self._conectar_mvc()
         self._conectar_controles()
+        self._crear_atajos()
         self._actualizar_combo_favoritos()
 
         self.sincronizar_hacia_motor()
+        self._actualizar_indicadores_vista()
         self.mandelbrot.setFocus()
+
+    # --- BARRA DE ESTADO ---
+    def _crear_barra_de_estado(self):
+        barra = self.statusBar()
+        self.indicador_calculo = QtWidgets.QLabel()
+        self.indicador_aviso = QtWidgets.QLabel()
+        self.indicador_aviso.setStyleSheet("color: #e0a060;")
+        self.indicador_zoom = QtWidgets.QLabel()
+        self.indicador_modo = QtWidgets.QLabel()
+        ayuda = QtWidgets.QLabel("F1 atajos")
+        ayuda.setStyleSheet(f"color: {ts.TEXTO_TENUE};")
+        for w in (self.indicador_calculo, self.indicador_aviso, self.indicador_zoom, self.indicador_modo, ayuda):
+            barra.addPermanentWidget(w)
+        self._al_cambiar_modo_completo(False)
+        # Mientras un render tarda, muestra hace cuánto está calculando
+        self._timer_calculo = QTimer(self)
+        self._timer_calculo.setInterval(200)
+        self._timer_calculo.timeout.connect(self._actualizar_indicador_calculo)
+
+    def _actualizar_indicador_calculo(self):
+        if self._inicio_calculo is None:
+            return
+        transcurrido = time.monotonic() - self._inicio_calculo
+        if transcurrido >= SEGUNDOS_ANTES_DE_MOSTRAR_CALCULO:
+            self.indicador_calculo.setText(f"calculando… {transcurrido:.1f} s")
+
+    def _al_empezar_render(self):
+        self._inicio_calculo = time.monotonic()
+        self._timer_calculo.start()
+
+    def _parar_indicador_calculo(self):
+        self._inicio_calculo = None
+        self._timer_calculo.stop()
+        self.indicador_calculo.clear()
+
+    def _actualizar_indicadores_vista(self, *args):
+        m = self.mandelbrot
+        self.indicador_zoom.setText(f"zoom {m.ancho_vista():.2e}")
+        # Aviso si el método elegido no tiene precisión para esta profundidad
+        profundo = (m.tipo_fractal, m.tipo_calculo) in METODOS_PROFUNDOS
+        if m.tipo_calculo and not profundo and m.paso_pixel() < LIMITE_DOUBLE:
+            self.indicador_aviso.setText("⚠ este método no alcanza a esta profundidad: usá perturbación")
+        else:
+            self.indicador_aviso.clear()
 
     # --- COMBOS ---
     def inicializar_combos(self):
@@ -149,6 +113,15 @@ class MainWindow(QMainWindow):
         if self.ui.tipo_fractal_comboBox.count() > 0:
             self.actualizar_combo_calculo(self.ui.tipo_fractal_comboBox.currentText())
         self.ui.paleta_comboBox.addItems([nombre for nombre, _ in PALETTE_REGISTRY])
+        self.ui.interior_comboBox.addItems(list(COLORES_INTERIOR))
+
+    def _metodo_por_defecto(self, fractal: str) -> str | None:
+        metodos = list(FRACTAL_REGISTRY.get(fractal, {}))
+        guardado = self.ajustes.value("fractal/metodo", "")
+        for candidato in (guardado, *METODOS_PREFERIDOS):
+            if candidato in metodos:
+                return candidato
+        return metodos[0] if metodos else None
 
     def actualizar_combo_calculo(self, fractal):
         combo = self.ui.tipo_calculo_comboBox
@@ -156,31 +129,86 @@ class MainWindow(QMainWindow):
         combo.blockSignals(True)
         combo.clear()
         combo.addItems(list(FRACTAL_REGISTRY.get(fractal, {}).keys()))
-        # Si el método anterior existe también para este fractal, se mantiene
-        if combo.findText(anterior) >= 0:
-            combo.setCurrentText(anterior)
+        # Si el método anterior existe también para este fractal se mantiene; si no, el preferido
+        elegido = anterior if combo.findText(anterior) >= 0 else self._metodo_por_defecto(fractal)
+        if elegido:
+            combo.setCurrentText(elegido)
         combo.blockSignals(False)
         es_julia = fractal == "Julia"
         for w in (self.ui.julia_re_entrada, self.ui.julia_im_entrada,
                   self.ui.julia_re_label, self.ui.julia_im_label):
             w.setEnabled(es_julia)
 
+    # --- PREFERENCIAS ---
+    def _restaurar_preferencias(self):
+        a, ui = self.ajustes, self.ui
+        geometria = a.value("ventana/geometria")
+        if geometria is not None:
+            self.restoreGeometry(geometria)
+        fractal = a.value("fractal/tipo", "")
+        if ui.tipo_fractal_comboBox.findText(fractal) >= 0:
+            ui.tipo_fractal_comboBox.setCurrentText(fractal)
+        self.actualizar_combo_calculo(ui.tipo_fractal_comboBox.currentText())
+        paleta = a.value("color/paleta", "")
+        if ui.paleta_comboBox.findText(paleta) >= 0:
+            ui.paleta_comboBox.setCurrentText(paleta)
+        ui.clase_equiv_entrada.setText(str(a.value("color/ciclo", 128)))
+        ui.suave_checkBox.setChecked(a.value("color/suave", False, type=bool))
+        ui.iluminacion_checkBox.setChecked(a.value("color/iluminacion", False, type=bool))
+        ui.antialiasing_checkBox.setChecked(a.value("color/antialiasing", False, type=bool))
+        angulo = int(a.value("color/angulo_luz", 45))
+        ui.angulo_luz_slider.setValue(angulo)
+        ui.angulo_luz_label.setText(f"Luz {angulo}°")
+        personalizado = a.value("color/interior_personalizado", "")
+        if QColor(personalizado).isValid():
+            c = QColor(personalizado)
+            self._color_personalizado = (c.red(), c.green(), c.blue())
+        interior = a.value("color/interior", "Color de la paleta")
+        if ui.interior_comboBox.findText(interior) >= 0:
+            ui.interior_comboBox.setCurrentText(interior)
+        self._indice_interior = ui.interior_comboBox.currentIndex()
+        ui.julia_re_entrada.setText(str(a.value("fractal/julia_re", "-0.8")))
+        ui.julia_im_entrada.setText(str(a.value("fractal/julia_im", "0.156")))
+        if a.value("render/modo_completo", False, type=bool):
+            self.mandelbrot.toggle_modo_completo()
+            self._al_cambiar_modo_completo(True)
+
+    def _guardar_preferencias(self):
+        a, ui = self.ajustes, self.ui
+        a.setValue("ventana/geometria", self.saveGeometry())
+        a.setValue("fractal/tipo", ui.tipo_fractal_comboBox.currentText())
+        a.setValue("fractal/metodo", ui.tipo_calculo_comboBox.currentText())
+        a.setValue("fractal/julia_re", ui.julia_re_entrada.text())
+        a.setValue("fractal/julia_im", ui.julia_im_entrada.text())
+        a.setValue("color/paleta", ui.paleta_comboBox.currentText())
+        a.setValue("color/ciclo", ui.clase_equiv_entrada.text())
+        a.setValue("color/suave", ui.suave_checkBox.isChecked())
+        a.setValue("color/iluminacion", ui.iluminacion_checkBox.isChecked())
+        a.setValue("color/antialiasing", ui.antialiasing_checkBox.isChecked())
+        a.setValue("color/angulo_luz", ui.angulo_luz_slider.value())
+        a.setValue("color/interior", ui.interior_comboBox.currentText())
+        a.setValue("color/interior_personalizado", QColor(*self._color_personalizado).name())
+        a.setValue("render/modo_completo", self.mandelbrot.modo_completo)
+
     # --- ARQUITECTURA MVC ---
     def _conectar_mvc(self):
-        self.mandelbrot.coordenadas_raton_cambiadas.connect(self.actualizar_textos_coordenadas)
-        self.mandelbrot.limites_zoom_cambiados.connect(self.actualizar_cajas_zoom)
-        self.mandelbrot.parametros_matematicos_cambiados.connect(self.actualizar_cajas_matematicas)
-        self.mandelbrot.paleta_cambiada.connect(self._al_cambiar_paleta_desde_teclado)
-        self.mandelbrot.render_terminado.connect(self._al_terminar_render)
-        self.mandelbrot.modo_completo_cambiado.connect(self._al_cambiar_modo_completo)
-        self.mandelbrot.render_fallido.connect(
-            lambda mensaje: self.statusBar().showMessage(f"Error al calcular: {mensaje}", 10000))
+        m = self.mandelbrot
+        m.coordenadas_raton_cambiadas.connect(self.actualizar_textos_coordenadas)
+        m.limites_zoom_cambiados.connect(self.actualizar_cajas_zoom)
+        m.limites_zoom_cambiados.connect(self._actualizar_indicadores_vista)
+        m.parametros_matematicos_cambiados.connect(self.actualizar_cajas_matematicas)
+        m.paleta_cambiada.connect(self._al_cambiar_paleta_desde_teclado)
+        m.render_empezado.connect(self._al_empezar_render)
+        m.render_terminado.connect(self._al_terminar_render)
+        m.modo_completo_cambiado.connect(self._al_cambiar_modo_completo)
+        m.render_fallido.connect(self._al_fallar_render)
 
     def _conectar_controles(self):
         ui = self.ui
         ui.tipo_fractal_comboBox.currentTextChanged.connect(self.actualizar_combo_calculo)
         for combo in (ui.tipo_fractal_comboBox, ui.tipo_calculo_comboBox, ui.paleta_comboBox):
             combo.currentIndexChanged.connect(self.sincronizar_hacia_motor)
+        ui.interior_comboBox.currentIndexChanged.connect(self._al_elegir_interior)
         for entrada in (ui.max_iter_entrada, ui.clase_equiv_entrada, ui.zoom_in_factor_entrada,
                         ui.zoom_out_factor_entrada, ui.julia_re_entrada, ui.julia_im_entrada):
             entrada.editingFinished.connect(self.sincronizar_hacia_motor)
@@ -204,6 +232,16 @@ class MainWindow(QMainWindow):
         ui.boton_hacer_fractal.clicked.connect(self.video_dialogo)
         ui.boton_resetear.clicked.connect(self.resetear_vista)
 
+    def _crear_atajos(self):
+        # A nivel ventana, así andan aunque el foco esté en otro control
+        QShortcut(QKeySequence(Qt.Key_F1), self, lambda: mostrar_atajos(self))
+        QShortcut(QKeySequence("Alt+Left"), self, self.mandelbrot.atras)
+        QShortcut(QKeySequence("Alt+Right"), self, self.mandelbrot.adelante)
+
+    def color_interior(self):
+        valor = COLORES_INTERIOR[self.ui.interior_comboBox.currentText()]
+        return self._color_personalizado if valor == "elegir" else valor
+
     def opciones_desde_ui(self) -> OpcionesColor:
         ui = self.ui
         return OpcionesColor(
@@ -211,6 +249,7 @@ class MainWindow(QMainWindow):
             iluminacion=ui.iluminacion_checkBox.isChecked(),
             antialiasing=ui.antialiasing_checkBox.isChecked(),
             angulo_luz=float(ui.angulo_luz_slider.value()),
+            interior=self.color_interior(),
         )
 
     def sincronizar_hacia_motor(self, *args):
@@ -236,6 +275,7 @@ class MainWindow(QMainWindow):
             opciones=self.opciones_desde_ui(),
             **parametros,
         )
+        self._actualizar_indicadores_vista()
 
     def aplicar_vista_desde_cajas(self):
         try:
@@ -257,6 +297,19 @@ class MainWindow(QMainWindow):
         self.ui.angulo_luz_label.setText(f"Luz {valor}°")
         self.sincronizar_hacia_motor()
 
+    def _al_elegir_interior(self, indice):
+        if COLORES_INTERIOR[self.ui.interior_comboBox.currentText()] == "elegir":
+            color = QtWidgets.QColorDialog.getColor(QColor(*self._color_personalizado), self, "Color del interior")
+            if not color.isValid():
+                # Se canceló: vuelve a la opción anterior
+                self.ui.interior_comboBox.blockSignals(True)
+                self.ui.interior_comboBox.setCurrentIndex(self._indice_interior)
+                self.ui.interior_comboBox.blockSignals(False)
+                return
+            self._color_personalizado = (color.red(), color.green(), color.blue())
+        self._indice_interior = indice
+        self.sincronizar_hacia_motor()
+
     def _al_cambiar_modo_completo(self, activo):
         if activo:
             self.indicador_modo.setText("FOTO COMPLETA  [Q]")
@@ -270,11 +323,13 @@ class MainWindow(QMainWindow):
         self.ui.paleta_comboBox.setCurrentIndex(indice)
         self.ui.paleta_comboBox.blockSignals(False)
 
-    def _al_terminar_render(self, segundos, aplicadas, ancho, alto, final):
+    def _al_terminar_render(self, segundos, aplicadas, ancho, alto, final, recalculado):
         if not final:
             return
+        self._parar_indicador_calculo()
         pedidas = self.opciones_desde_ui()
-        texto = f"{ancho}x{alto} en {segundos * 1000:.0f} ms"
+        accion = "en" if recalculado else "recoloreado en"
+        texto = f"{ancho}x{alto} {accion} {segundos * 1000:.0f} ms"
         # Avisa si se pidió algo que el método elegido no sabe calcular
         faltan = [nombre for clave, nombre, activo in (("suave", "coloreo suave", pedidas.suave),
                                                        ("iluminacion", "iluminación", pedidas.iluminacion))
@@ -283,8 +338,12 @@ class MainWindow(QMainWindow):
             texto += f"   ({', '.join(faltan)}: solo con los métodos de perturbación)"
         self.statusBar().showMessage(texto)
 
+    def _al_fallar_render(self, mensaje):
+        self._parar_indicador_calculo()
+        self.statusBar().showMessage(f"Error al calcular: {mensaje}", 10000)
+
     def actualizar_textos_coordenadas(self, real, imag):
-        self.ui.label_coordenadas.setText(f"Re: {real:.16f}, Im: {imag:.16f}")
+        self.ui.label_coordenadas.setText(f"Re: {real}    Im: {imag}")
 
     def actualizar_cajas_zoom(self, xmin, xmax, ymin, ymax):
         self.ui.xmin_entrada.setText(str(xmin))
@@ -342,9 +401,11 @@ class MainWindow(QMainWindow):
             return
         fav = self.favoritos[indice]
         ui = self.ui
+        controles = (ui.tipo_fractal_comboBox, ui.tipo_calculo_comboBox, ui.paleta_comboBox,
+                     ui.interior_comboBox, ui.suave_checkBox, ui.iluminacion_checkBox,
+                     ui.antialiasing_checkBox, ui.angulo_luz_slider)
         # Se cargan los controles y después se sincroniza todo de una vez
-        for w in (ui.tipo_fractal_comboBox, ui.tipo_calculo_comboBox, ui.paleta_comboBox,
-                  ui.suave_checkBox, ui.iluminacion_checkBox, ui.antialiasing_checkBox, ui.angulo_luz_slider):
+        for w in controles:
             w.blockSignals(True)
         if ui.tipo_fractal_comboBox.findText(fav.tipo_fractal) >= 0:
             ui.tipo_fractal_comboBox.setCurrentText(fav.tipo_fractal)
@@ -361,8 +422,8 @@ class MainWindow(QMainWindow):
         ui.antialiasing_checkBox.setChecked(op.antialiasing)
         ui.angulo_luz_slider.setValue(int(op.angulo_luz))
         ui.angulo_luz_label.setText(f"Luz {int(op.angulo_luz)}°")
-        for w in (ui.tipo_fractal_comboBox, ui.tipo_calculo_comboBox, ui.paleta_comboBox,
-                  ui.suave_checkBox, ui.iluminacion_checkBox, ui.antialiasing_checkBox, ui.angulo_luz_slider):
+        self._seleccionar_interior(op.interior)
+        for w in controles:
             w.blockSignals(False)
         ui.max_iter_entrada.setText(str(fav.max_iter))
         ui.clase_equiv_entrada.setText(str(fav.clase_equiv))
@@ -372,6 +433,18 @@ class MainWindow(QMainWindow):
         self.mandelbrot.ymin, self.mandelbrot.ymax = Decimal(fav.ymin), Decimal(fav.ymax)
         self.mandelbrot.corregir_aspect_ratio()
         self.sincronizar_hacia_motor()
+
+    def _seleccionar_interior(self, color):
+        """Pone el combo del interior en la opción que corresponde al color guardado."""
+        color = tuple(color) if color is not None else None
+        for nombre, valor in COLORES_INTERIOR.items():
+            if valor == color:
+                self.ui.interior_comboBox.setCurrentText(nombre)
+                break
+        else:
+            self._color_personalizado = color
+            self.ui.interior_comboBox.setCurrentText("Personalizado…")
+        self._indice_interior = self.ui.interior_comboBox.currentIndex()
 
     def borrar_favorito(self):
         indice = self.ui.favoritos_comboBox.currentIndex()
@@ -384,29 +457,32 @@ class MainWindow(QMainWindow):
         favoritos.guardar(self.favoritos)
         self._actualizar_combo_favoritos()
 
-    # --- LÓGICA DE EXPORTACIÓN (Ventanas de Diálogo) ---
+    # --- EXPORTACIÓN ---
     def _elegir_resolucion(self, titulo):
-        opcion, ok = QInputDialog.getItem(self, titulo, "Seleccionar resolución:", list(RESOLUCIONES), 0, False)
+        opcion, ok = QInputDialog.getItem(self, titulo, "Seleccionar resolución:", list(RESOLUCIONES_IMAGEN), 0, False)
         if not ok:
             return None
-        return RESOLUCIONES[opcion] or self.mandelbrot.tamano_render()
+        return RESOLUCIONES_IMAGEN[opcion] or self.mandelbrot.tamano_render()
 
     def guardar_imagen_dialogo(self):
         resolucion = self._elegir_resolucion("Guardar imagen")
         if resolucion is None: return
+        carpeta = self.ajustes.value("carpetas/imagenes", "")
+        sugerido = f"fractal_{self.mandelbrot.tipo_fractal}.png"
         ruta, _ = QFileDialog.getSaveFileName(
-            self, "Guardar imagen", f"fractal_{self.mandelbrot.tipo_fractal}.png", "PNG (*.png);;JPEG (*.jpg *.jpeg)"
+            self, "Guardar imagen", f"{carpeta}/{sugerido}" if carpeta else sugerido,
+            "PNG (*.png);;JPEG (*.jpg *.jpeg)"
         )
         if not ruta: return
+        self.ajustes.setValue("carpetas/imagenes", ruta.rsplit("/", 1)[0])
 
         self.sincronizar_hacia_motor()
         pedido = self.mandelbrot.pedido_actual(*resolucion)
         QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            # Motor propio: el de la pantalla vive en el hilo de render
-            motor = calculos_mandelbrot(*VISTA_INICIAL, 1, 1, 1, pedido.tipo_calculo, pedido.tipo_fractal)
-            imagen = renderizar(motor, pedido)
-            _guardar_png(ruta, imagen.rgb)
+            # Renderizador propio: el de la pantalla vive en el hilo de render
+            imagen = Renderizador(tam_cache=0).renderizar(pedido)
+            guardar_imagen(ruta, imagen.rgb)
         except Exception as e:
             log.exception("No se pudo guardar la imagen")
             QMessageBox.critical(self, "Guardar imagen", f"No se pudo guardar la imagen:\n{e}")
@@ -417,49 +493,57 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Imagen guardada: {ruta}", 10000)
 
     def video_dialogo(self):
-        carpeta = QFileDialog.getExistingDirectory(
-            self, "Seleccionar dónde guardar el video (se crea una subcarpeta nueva)")
-        if not carpeta: return
-
-        resolucion = self._elegir_resolucion("Video")
-        if resolucion is None: return
-
-        duracion, ok_dur = QInputDialog.getDouble(self, "Video", "Duración del video (segundos):", 10.0, 0.1, 3600.0, 1)
-        if not ok_dur: return
-
-        fps, ok_fps = QInputDialog.getInt(self, "Video", "Fotogramas por segundo:", 30, 1, 240)
-        if not ok_fps: return
-
-        self.sincronizar_hacia_motor()
-        cuadros = max(1, round(fps * duracion))
-        # Cada video en su propia subcarpeta, para no mezclar cuadros con videos anteriores
-        try:
-            carpeta = crear_carpeta_video(carpeta)
-        except OSError as e:
-            QMessageBox.critical(self, "Video", f"No se pudo crear la carpeta del video:\n{e}")
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "Video", "Ya hay un video renderizándose.")
             return
-        self.statusBar().showMessage(f"Guardando el video en {carpeta}", 10000)
-        render_w, render_h = resolucion
+        self.sincronizar_hacia_motor()
+        dialogo = DialogoVideo(self.ajustes, self.mandelbrot.tamano_render(), self.mandelbrot.pedido_actual, self)
+        if dialogo.exec() != QtWidgets.QDialog.Accepted:
+            return
 
-        self.progreso_ui = DialogoProgresoVideo(
-            f"Zoom desde el fractal entero hasta la vista actual\n{cuadros} cuadros de {render_w}x{render_h}",
-            cuadros, self)
+        if dialogo.accion == "continuar":
+            carpeta = dialogo.carpeta_continuar
+            datos, config = cargar_plan(carpeta)
+            pedido = pedido_desde_plan(datos, config)
+        else:
+            config = dialogo.config()
+            base = QFileDialog.getExistingDirectory(
+                self, "Seleccionar dónde guardar el video (se crea una subcarpeta nueva)",
+                self.ajustes.value("carpetas/videos", ""))
+            if not base:
+                return
+            self.ajustes.setValue("carpetas/videos", base)
+            try:
+                # Cada video en su propia subcarpeta, para no mezclar cuadros con videos anteriores
+                carpeta = crear_carpeta_video(base)
+            except OSError as e:
+                QMessageBox.critical(self, "Video", f"No se pudo crear la carpeta del video:\n{e}")
+                return
+            pedido = self.mandelbrot.pedido_actual(config.ancho, config.alto)
+
+        self.statusBar().showMessage(f"Guardando el video en {carpeta}", 10000)
+        texto = (f"Zoom desde el fractal entero hasta la vista elegida\n"
+                 f"{config.cuadros} cuadros de {config.ancho}x{config.alto} "
+                 f"({formatear_duracion(config.cuadros / config.fps)} de video)")
+        self.progreso_ui = DialogoProgresoVideo(texto, config.cuadros, self)
         self.progreso_ui.show()
 
-        self.worker = WorkerVideo(self.mandelbrot.pedido_actual(render_w, render_h), carpeta, fps, duracion)
+        self.worker = WorkerVideo(pedido, carpeta, config)
+        self.worker.empezo.connect(self.progreso_ui.empezar)
         self.worker.progreso.connect(self.progreso_ui.actualizar)
         self.worker.terminado.connect(self._video_terminado)
-        self.progreso_ui.cancelado.connect(self.worker.requestInterruption)
+        self.progreso_ui.cancelado.connect(self.worker.cancelar)
         self.worker.start()
 
     def _video_terminado(self, mensaje):
         self.progreso_ui.terminar()
         log.info(mensaje)
-        self.statusBar().showMessage(mensaje, 15000)
+        self.statusBar().showMessage(mensaje, 30000)
 
     def closeEvent(self, event):
+        self._guardar_preferencias()
         self.mandelbrot.detener()
-        if getattr(self, "worker", None) is not None and self.worker.isRunning():
-            self.worker.requestInterruption()
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancelar()
             self.worker.wait()
         super().closeEvent(event)

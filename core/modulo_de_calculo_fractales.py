@@ -49,10 +49,21 @@ class Resultado:
 
 
 FRACTAL_REGISTRY: dict[str, dict[str, callable]] = {}
+# (fractal, método) que calculan con precisión arbitraria y sirven a cualquier profundidad
+METODOS_PROFUNDOS: set[tuple[str, str]] = set()
+# Paso entre píxeles por debajo del cual un método en double ya no alcanza
+LIMITE_DOUBLE = Decimal('1e-13')
 
-def register_fractal(fractal: str, calc: str, requiere: str | tuple[str, ...] = ()) -> callable:
+
+class RenderCancelado(Exception):
+    """El cálculo se abandonó porque llegó un pedido más nuevo (ver calculos_mandelbrot.cancelar)."""
+
+
+def register_fractal(fractal: str, calc: str, requiere: str | tuple[str, ...] = (),
+                     profundo: bool = False) -> callable:
     """Registra un método de cálculo. `requiere` son los backends ("gpu", "mandelbrot.dll", ...)
-    que tienen que estar disponibles; si falta alguno, el método no aparece en la UI."""
+    que tienen que estar disponibles; si falta alguno, el método no aparece en la UI.
+    `profundo`: el método no pierde precisión al hacer zoom (perturbación, GMP)."""
     requisitos = (requiere,) if isinstance(requiere, str) else requiere
     def deco(fn) -> callable:
         faltantes = [r for r in requisitos if not BACKENDS_DISPONIBLES.get(r, False)]
@@ -60,6 +71,8 @@ def register_fractal(fractal: str, calc: str, requiere: str | tuple[str, ...] = 
             log.info("Se omite '%s / %s': falta %s", fractal, calc, ", ".join(faltantes))
             return fn
         FRACTAL_REGISTRY.setdefault(fractal, {})[calc] = fn
+        if profundo:
+            METODOS_PROFUNDOS.add((fractal, calc))
         return fn
     return deco
 
@@ -103,12 +116,14 @@ class _OrbitaGMP:
     """Órbita de referencia y tabla BLA, guardadas del lado de la DLL (perturbacion.cpp)."""
 
     def __init__(self, formula: str, c_re: Decimal, c_im: Decimal, k_re: Decimal, k_im: Decimal,
-                 max_iter: int, bits: int):
+                 max_iter: int, bits: int, bandera_cancelar: ctypes.c_int):
         inicio = time.perf_counter()
         texto = lambda v: format(v, 'f').encode('ascii')
         self.formula = formula
         self.h = cpp.pert_crear(FORMULAS[formula], texto(c_re), texto(c_im), texto(k_re), texto(k_im),
-                                max_iter, bits)
+                                max_iter, bits, ctypes.byref(bandera_cancelar))
+        if not self.h:
+            raise RenderCancelado()
         self.largo = cpp.pert_largo(self.h)
         k_re_d, k_im_d = ctypes.c_double(), ctypes.c_double()
         cpp.pert_parametro(self.h, ctypes.byref(k_re_d), ctypes.byref(k_im_d))
@@ -185,6 +200,8 @@ class calculos_mandelbrot:
         # Salidas extra que se le piden a los backends que las soportan (ver Resultado)
         self.pedir_suave = False
         self.pedir_derivada = False
+        # Otro hilo la pone en 1 para abandonar el cálculo en curso (ver cancelar())
+        self.bandera_cancelar = ctypes.c_int(0)
         self._cache_orbita = None
         self._fijar_limites(xmin, xmax, ymin, ymax)
         self.width = width
@@ -230,6 +247,19 @@ class calculos_mandelbrot:
         self.imag = float(imag)
         return None
 
+    def cancelar(self) -> None:
+        """Pide abandonar el cálculo en curso (se puede llamar desde otro hilo). Los backends de
+        perturbación lo revisan seguido; el resto termina el cuadro igual."""
+        self.bandera_cancelar.value = 1
+
+    def reiniciar_cancelacion(self) -> None:
+        """Vuelve a habilitar el cálculo después de una cancelación."""
+        self.bandera_cancelar.value = 0
+
+    def _revisar_cancelacion(self) -> None:
+        if self.bandera_cancelar.value:
+            raise RenderCancelado()
+
     def calcular_fractal(self) -> Resultado:
         metodos = FRACTAL_REGISTRY.get(self.tipo_fractal)
         if metodos is None:
@@ -237,6 +267,7 @@ class calculos_mandelbrot:
         if self.tipo_calculo not in metodos:
             raise ValueError(f"Tipo de cálculo '{self.tipo_calculo}' no soportado para el fractal '{self.tipo_fractal}'.")
         resultado = metodos[self.tipo_calculo](self)
+        self._revisar_cancelacion()
         if isinstance(resultado, Resultado):
             return resultado
         # Los backends simples devuelven solo la matriz de iteraciones (o de valores)
@@ -333,7 +364,8 @@ class calculos_mandelbrot:
         # se reutiliza la órbita si no cambió nada que la afecte.
         clave = (formula, c_re, c_im, k_re, k_im, self.max_iter, bits)
         if self._cache_orbita is None or self._cache_orbita[0] != clave:
-            self._cache_orbita = (clave, _OrbitaGMP(formula, c_re, c_im, k_re, k_im, self.max_iter, bits))
+            self._cache_orbita = (clave, _OrbitaGMP(formula, c_re, c_im, k_re, k_im, self.max_iter, bits,
+                                                    self.bandera_cancelar))
         orbita = self._cache_orbita[1]
 
         modo = self.modo_perturbacion
@@ -349,7 +381,9 @@ class calculos_mandelbrot:
 
         dc = tuple(_a_floatexp(v) for v in
                    (self.xmin_dec - c_re, self.ymin_dec - c_im, step_x, step_y, paso))
-        return orbita, modo, dc
+        # Para dividir el render en franjas: dc_y de la fila j = base_y + j * step_y
+        filas = (self.ymin_dec - c_im, step_y)
+        return orbita, modo, dc, filas
 
     def _log_perturbacion(self, orbita, modo, pasos, iteraciones) -> None:
         if log.isEnabledFor(logging.DEBUG):
@@ -371,7 +405,7 @@ class calculos_mandelbrot:
 
     def _render_perturbacion(self, formula: str, en_gpu: bool) -> Resultado:
         """Render por perturbación de cualquier fórmula de FORMULAS, en CPU o GPU."""
-        orbita, modo, dc = self._preparar_perturbacion(formula)
+        orbita, modo, dc, (base_y, step_y) = self._preparar_perturbacion(formula)
         salidas = self._salidas_pedidas()
         forma = (self.height, self.width)
         # Las salidas que no se piden se reemplazan por una matriz mínima (no se escriben)
@@ -384,7 +418,7 @@ class calculos_mandelbrot:
             pasos = cpp.pert_render(
                 orbita.h, *dc[0], *dc[1], *dc[2], *dc[3], *dc[4],
                 self.width, self.height, self.max_iter, salidas,
-                iteraciones, suave, distancia, nx, ny
+                iteraciones, suave, distancia, nx, ny, ctypes.byref(self.bandera_cancelar)
             )
         else:
             Z, tabla, off, cnt = orbita.en_gpu()
@@ -392,34 +426,44 @@ class calculos_mandelbrot:
             suave = cp.empty(forma_extra(SALIDA_SUAVE), dtype=cp.float32)
             distancia, nx, ny = (cp.empty(forma_extra(SALIDA_DERIVADA), dtype=cp.float32) for _ in range(3))
             pasos_gpu = cp.zeros(1, dtype=cp.uint64)
-            argumentos_dc = []
-            for mantisa, exponente in dc:
-                argumentos_dc += [np.float64(mantisa), np.int32(exponente)]
-            bloque = (16, 16)
-            grilla = ((self.width + 15) // 16, (self.height + 15) // 16)
-            kernel_perturbacion(formula, modo)(grilla, bloque, (
-                Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
-                *argumentos_dc, np.float64(orbita.k[0]), np.float64(orbita.k[1]),
-                np.int32(self.width), np.int32(self.height), np.int32(self.max_iter), np.int32(salidas),
-                iteraciones, suave, distancia, nx, ny, pasos_gpu
-            ))
+            kernel = kernel_perturbacion(formula, modo)
+            fe_args = lambda fe: [np.float64(fe[0]), np.int32(fe[1])]
+            # Se lanza por franjas de filas: entre una y otra se puede abandonar el cálculo
+            alto_franja = max(8, -(-self.height // 32))
+            for fila in range(0, self.height, alto_franja):
+                self._revisar_cancelacion()
+                filas = min(alto_franja, self.height - fila)
+                por_fila = lambda m: m[fila:fila + filas] if m.shape[0] > 1 else m
+                bloque = (16, 16)
+                grilla = ((self.width + 15) // 16, (filas + 15) // 16)
+                kernel(grilla, bloque, (
+                    Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
+                    *fe_args(dc[0]), *fe_args(_a_floatexp(base_y + fila * step_y)),
+                    *fe_args(dc[2]), *fe_args(dc[3]), *fe_args(dc[4]),
+                    np.float64(orbita.k[0]), np.float64(orbita.k[1]),
+                    np.int32(self.width), np.int32(filas), np.int32(self.max_iter), np.int32(salidas),
+                    por_fila(iteraciones), por_fila(suave), por_fila(distancia), por_fila(nx), por_fila(ny),
+                    pasos_gpu
+                ))
+                cp.cuda.Stream.null.synchronize()
             iteraciones, suave, distancia, nx, ny = (x.get() for x in (iteraciones, suave, distancia, nx, ny))
             pasos = int(pasos_gpu.get()[0])
 
+        self._revisar_cancelacion()
         self._log_perturbacion(orbita, modo, pasos, iteraciones)
         return self._resultado(iteraciones, suave, distancia, nx, ny, salidas)
 
-    @register_fractal("Mandelbrot", "perturbacion_cpu", requiere="perturbacion.dll")
+    @register_fractal("Mandelbrot", "perturbacion_cpu", requiere="perturbacion.dll", profundo=True)
     @medir_tiempo("Mandelbrot Perturbacion CPU")
     def hacer_mandelbrot_perturbacion_cpu(self) -> Resultado:
         return self._render_perturbacion("mandelbrot", en_gpu=False)
 
-    @register_fractal("Mandelbrot", "perturbacion_gpu", requiere=("gpu", "perturbacion.dll"))
+    @register_fractal("Mandelbrot", "perturbacion_gpu", requiere=("gpu", "perturbacion.dll"), profundo=True)
     @medir_tiempo("Mandelbrot Perturbacion GPU")
     def hacer_mandelbrot_perturbacion_gpu(self) -> Resultado:
         return self._render_perturbacion("mandelbrot", en_gpu=True)
 
-    @register_fractal("Mandelbrot", "gmp", requiere="gmp_puro.dll")
+    @register_fractal("Mandelbrot", "gmp", requiere="gmp_puro.dll", profundo=True)
     @medir_tiempo("Gmp")
     def hacer_mandelbrot_gmp_puro(self) -> np.ndarray:
         step = (self.xmax_dec - self.xmin_dec) / max(1, self.width - 1)

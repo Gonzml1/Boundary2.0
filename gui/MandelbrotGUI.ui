@@ -53,6 +53,12 @@
       </item>
       <item>
        <widget class="QLabel" name="label_coordenadas">
+        <property name="sizePolicy">
+         <sizepolicy hsizetype="Ignored" vsizetype="Preferred">
+          <horstretch>0</horstretch>
+          <verstretch>0</verstretch>
+         </sizepolicy>
+        </property>
         <property name="text">
          <string>Re: -, Im: -</string>
         </property>
@@ -387,6 +393,23 @@
             <widget class="QCheckBox" name="antialiasing_checkBox">
              <property name="text">
               <string>Antialiasing (2x2)</string>
+             </property>
+            </widget>
+           </item>
+           <item row="6" column="0">
+            <widget class="QLabel" name="interior_label">
+             <property name="text">
+              <string>Interior</string>
+             </property>
+            </widget>
+           </item>
+           <item row="6" column="1">
+            <widget class="QComboBox" name="interior_comboBox">
+             <property name="sizeAdjustPolicy">
+              <enum>QComboBox::AdjustToMinimumContentsLengthWithIcon</enum>
+             </property>
+             <property name="minimumContentsLength">
+              <number>8</number>
              </property>
             </widget>
            </item>

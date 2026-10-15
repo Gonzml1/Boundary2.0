@@ -15,7 +15,7 @@
 // - floatexp: en zooms donde dc ya no entra en un double se usa un double con exponente aparte.
 //
 // Uso desde Python (core/backend_cpp.py):
-//   h = pert_crear(formula, c_re, c_im, k_re, k_im, max_iter, bits)   órbita de referencia
+//   h = pert_crear(formula, c_re, c_im, k_re, k_im, max_iter, bits, cancelar)   órbita de referencia
 //   pert_preparar_bla(h, modo, |dc|max, eps)                           tabla BLA (0 double, 1 floatexp)
 //   pert_render(h, ...)                                                render en CPU
 //   pert_exportar(h, ...)                                              órbita y tabla para la GPU
@@ -80,8 +80,10 @@ static void referencia_paso_mandelbrot(mpf_t z_re, mpf_t z_im, const mpf_t c_re,
 // Calcula la órbita de referencia de la fórmula con `prec_bits` bits. Corta cuando escapa.
 // (c_re, c_im): el punto de la referencia (el centro de la vista).
 // (k_re, k_im): parámetro de la fórmula (Mandelbrot no lo usa).
+// Si *cancelar se pone en 1 mientras calcula, abandona y devuelve NULL.
 EXPORT void* pert_crear(int formula, const char* c_re_str, const char* c_im_str,
-                        const char* k_re_str, const char* k_im_str, int max_iter, int prec_bits)
+                        const char* k_re_str, const char* k_im_str, int max_iter, int prec_bits,
+                        volatile int* cancelar)
 {
     Perturbacion* p = new Perturbacion();
     p->formula = formula;
@@ -105,7 +107,9 @@ EXPORT void* pert_crear(int formula, const char* c_re_str, const char* c_im_str,
     }
     p->Z_fe.push_back(mpf_a_cfe(z_re, z_im));
 
+    bool cancelado = false;
     for (int n = 1; n <= max_iter; ++n) {
+        if ((n & 1023) == 0 && cancelar && *cancelar) { cancelado = true; break; }
         switch (formula) {
         default: referencia_paso_mandelbrot(z_re, z_im, c_re, c_im, t);
         }
@@ -114,6 +118,7 @@ EXPORT void* pert_crear(int formula, const char* c_re_str, const char* c_im_str,
         if (a_double(norma2(z)) > 4.0) break;
     }
     mpf_clears(c_re, c_im, z_re, z_im, t.re2, t.im2, NULL);
+    if (cancelado) { delete p; return nullptr; }
 
     p->largo = (int)p->Z_fe.size();
     p->Z_d.resize(p->largo);
@@ -166,13 +171,15 @@ struct Salidas { int* iter; float* suave; float* distancia; float* nx; float* ny
 template<class F, class C, class R>
 static long long render(const Perturbacion* p, const C* Z, const Bla<C, R>* tabla,
                         FE bx, FE by, FE sx, FE sy, R paso_pixel,
-                        int width, int height, int max_iter, int salidas, Salidas out)
+                        int width, int height, int max_iter, int salidas, Salidas out,
+                        volatile int* cancelar)
 {
     const C k = complejo<C>(p->k_d.re, p->k_d.im);
     long long pasos_total = 0;
     // dynamic: las filas que tocan el interior del conjunto tardan mucho más que las otras
     #pragma omp parallel for schedule(dynamic, 1) reduction(+:pasos_total)
     for (int j = 0; j < height; ++j) {
+        if (cancelar && *cancelar) continue;      // un pedido más nuevo lo reemplazó: se abandona
         FE dc_im = by + sy * fe((double)j);
         long long pasos = 0;
         for (int i = 0; i < width; ++i) {
@@ -192,24 +199,27 @@ static long long render(const Perturbacion* p, const C* Z, const Bla<C, R>* tabl
 
 template<class F>
 static long long render_formula(const Perturbacion* p, FE bx, FE by, FE sx, FE sy, FE paso,
-                                int width, int height, int max_iter, int salidas, Salidas out)
+                                int width, int height, int max_iter, int salidas, Salidas out,
+                                volatile int* cancelar)
 {
     if (p->modo == 0)
         return render<F, CD, double>(p, p->Z_d.data(), p->bla_d.data(), bx, by, sx, sy, a_double(paso),
-                                     width, height, max_iter, salidas, out);
+                                     width, height, max_iter, salidas, out, cancelar);
     return render<F, CFE, FE>(p, p->Z_fe.data(), p->bla_fe.data(), bx, by, sx, sy, paso,
-                              width, height, max_iter, salidas, out);
+                              width, height, max_iter, salidas, out, cancelar);
 }
 
 // El píxel (i, j) tiene dc = (bx + i * sx, by + j * sy), todo pasado como (mantisa, exponente).
 // salidas: bits SALIDA_SUAVE / SALIDA_DERIVADA; las matrices que no se piden pueden ser NULL.
+// Si *cancelar se pone en 1, deja de calcular filas (la salida queda incompleta).
 // Devuelve la cantidad total de pasos hechos.
 EXPORT long long pert_render(void* h,
     double bx_m, int bx_e, double by_m, int by_e,
     double sx_m, int sx_e, double sy_m, int sy_e,
     double paso_m, int paso_e,
     int width, int height, int max_iter, int salidas,
-    int* iter, float* suave, float* distancia, float* nx, float* ny)
+    int* iter, float* suave, float* distancia, float* nx, float* ny,
+    volatile int* cancelar)
 {
     const Perturbacion* p = static_cast<Perturbacion*>(h);
     FE bx = fe_normalizar(bx_m, bx_e), by = fe_normalizar(by_m, by_e);
@@ -220,7 +230,7 @@ EXPORT long long pert_render(void* h,
                    (salidas & SALIDA_DERIVADA) ? distancia : nullptr, nx, ny};
     // FORMULAS
     switch (p->formula) {
-    default: return render_formula<Mandelbrot>(p, bx, by, sx, sy, paso, width, height, max_iter, salidas, out);
+    default: return render_formula<Mandelbrot>(p, bx, by, sx, sy, paso, width, height, max_iter, salidas, out, cancelar);
     }
 }
 
