@@ -1,8 +1,10 @@
 import math
+import ctypes
 import time
 import logging
 import decimal
 from decimal import Decimal
+from dataclasses import dataclass
 from functools import wraps
 
 import numpy as np
@@ -29,6 +31,21 @@ try:
 except Exception as e:
     log.warning("GPU no disponible, se omiten los backends CuPy: %s", e)
     BACKENDS_DISPONIBLES["gpu"] = False
+
+
+@dataclass
+class Resultado:
+    """Lo que devuelve un cálculo. Solo `iteraciones` es obligatorio: el resto lo llenan los
+    backends que lo saben calcular (hoy, la perturbación) y solo si se pidió."""
+    iteraciones: np.ndarray                  # (alto, ancho) int32; max_iter en el interior
+    suave: np.ndarray | None = None          # iteración continua (float32)
+    distancia: np.ndarray | None = None      # distancia al borde en píxeles (float32)
+    normal_x: np.ndarray | None = None       # normal unitaria del relieve (float32)
+    normal_y: np.ndarray | None = None
+
+    def __array__(self, dtype=None, copy=None):
+        # np.asarray(resultado) sigue devolviendo las iteraciones, como antes
+        return np.asarray(self.iteraciones, dtype=dtype)
 
 
 FRACTAL_REGISTRY: dict[str, dict[str, callable]] = {}
@@ -68,6 +85,9 @@ BLA_EPSILON = 2.0 ** -40
 # Por debajo de este paso entre píxeles se usa floatexp en vez de double
 # (con margen: las normas |dz|^2 tienen que seguir entrando en un double).
 UMBRAL_FLOATEXP = Decimal('1e-140')
+# FORMULAS: número de cada fórmula en codigos_cpp/perturbacion.cpp (y nombre de sus kernels de GPU)
+FORMULAS = {"mandelbrot": 0}
+SALIDA_SUAVE, SALIDA_DERIVADA = 1, 2
 
 
 def _a_floatexp(valor: Decimal) -> tuple[float, int]:
@@ -82,11 +102,17 @@ def _a_floatexp(valor: Decimal) -> tuple[float, int]:
 class _OrbitaGMP:
     """Órbita de referencia y tabla BLA, guardadas del lado de la DLL (perturbacion.cpp)."""
 
-    def __init__(self, c_re: Decimal, c_im: Decimal, max_iter: int, bits: int):
+    def __init__(self, formula: str, c_re: Decimal, c_im: Decimal, k_re: Decimal, k_im: Decimal,
+                 max_iter: int, bits: int):
         inicio = time.perf_counter()
-        self.h = cpp.pert_crear(format(c_re, 'f').encode('ascii'), format(c_im, 'f').encode('ascii'),
+        texto = lambda v: format(v, 'f').encode('ascii')
+        self.formula = formula
+        self.h = cpp.pert_crear(FORMULAS[formula], texto(c_re), texto(c_im), texto(k_re), texto(k_im),
                                 max_iter, bits)
         self.largo = cpp.pert_largo(self.h)
+        k_re_d, k_im_d = ctypes.c_double(), ctypes.c_double()
+        cpp.pert_parametro(self.h, ctypes.byref(k_re_d), ctypes.byref(k_im_d))
+        self.k = (k_re_d.value, k_im_d.value)   # parámetro de la fórmula, en double
         self.clave_bla = None
         self.niveles = 0
         self._gpu = None
@@ -156,6 +182,9 @@ class calculos_mandelbrot:
                  tipo_calculo: str, tipo_fractal: str) -> None:
         self.real = 0.0
         self.imag = 0.0
+        # Salidas extra que se le piden a los backends que las soportan (ver Resultado)
+        self.pedir_suave = False
+        self.pedir_derivada = False
         self._cache_orbita = None
         self._fijar_limites(xmin, xmax, ymin, ymax)
         self.width = width
@@ -201,13 +230,17 @@ class calculos_mandelbrot:
         self.imag = float(imag)
         return None
 
-    def calcular_fractal(self) -> np.ndarray:
+    def calcular_fractal(self) -> Resultado:
         metodos = FRACTAL_REGISTRY.get(self.tipo_fractal)
         if metodos is None:
             raise ValueError(f"Fractal '{self.tipo_fractal}' no registrado.")
         if self.tipo_calculo not in metodos:
             raise ValueError(f"Tipo de cálculo '{self.tipo_calculo}' no soportado para el fractal '{self.tipo_fractal}'.")
-        return metodos[self.tipo_calculo](self)
+        resultado = metodos[self.tipo_calculo](self)
+        if isinstance(resultado, Resultado):
+            return resultado
+        # Los backends simples devuelven solo la matriz de iteraciones (o de valores)
+        return Resultado(np.asarray(resultado))
 
     def _generar_malla_compleja_gpu(self):
         x = cp.linspace(self.xmin, self.xmax, self.width, dtype=cp.float64)
@@ -284,7 +317,7 @@ class calculos_mandelbrot:
     bla_epsilon = BLA_EPSILON        # 0 desactiva el BLA
     modo_perturbacion = None         # None = automático, 0 = double, 1 = floatexp
 
-    def _preparar_perturbacion(self):
+    def _preparar_perturbacion(self, formula: str):
         c_re = (self.xmin_dec + self.xmax_dec) / 2
         c_im = (self.ymin_dec + self.ymax_dec) / 2
         # Mismo muestreo que np.linspace(xmin, xmax, width) del resto de los backends
@@ -294,12 +327,13 @@ class calculos_mandelbrot:
         if paso and paso.adjusted() < -(PRECISION_DECIMAL - 40):
             log.warning("Zoom más allá de la precisión de las coordenadas (paso %s)", f"{paso:.3e}")
         bits = _bits_necesarios(paso)
+        k_re, k_im = _a_decimal(self.real), _a_decimal(self.imag)
 
-        # La calidad progresiva (low/medium/high) renderiza 3 veces el mismo centro:
+        # La calidad progresiva (low/medium/high) renderiza varias veces el mismo centro:
         # se reutiliza la órbita si no cambió nada que la afecte.
-        clave = (c_re, c_im, self.max_iter, bits)
+        clave = (formula, c_re, c_im, k_re, k_im, self.max_iter, bits)
         if self._cache_orbita is None or self._cache_orbita[0] != clave:
-            self._cache_orbita = (clave, _OrbitaGMP(c_re, c_im, self.max_iter, bits))
+            self._cache_orbita = (clave, _OrbitaGMP(formula, c_re, c_im, k_re, k_im, self.max_iter, bits))
         orbita = self._cache_orbita[1]
 
         modo = self.modo_perturbacion
@@ -307,55 +341,83 @@ class calculos_mandelbrot:
             modo = 1 if paso < UMBRAL_FLOATEXP else 0
 
         # Cota de |dc| en la imagen, redondeada hacia arriba a potencia de 2 para que la tabla
-        # BLA sirva para los tres niveles de calidad (una cota mayor solo la hace más conservadora).
+        # BLA sirva para todos los niveles de calidad (una cota mayor solo la hace más conservadora).
         dx = max(abs(self.xmin_dec - c_re), abs(self.xmax_dec - c_re))
         dy = max(abs(self.ymin_dec - c_im), abs(self.ymax_dec - c_im))
         _, e = _a_floatexp(dx + dy)
         orbita.preparar_bla(modo, (0.5, e + 1), self.bla_epsilon)
 
-        dc = tuple(_a_floatexp(v) for v in (self.xmin_dec - c_re, self.ymin_dec - c_im, step_x, step_y))
+        dc = tuple(_a_floatexp(v) for v in
+                   (self.xmin_dec - c_re, self.ymin_dec - c_im, step_x, step_y, paso))
         return orbita, modo, dc
 
-    def _log_perturbacion(self, orbita, modo, pasos, output) -> None:
+    def _log_perturbacion(self, orbita, modo, pasos, iteraciones) -> None:
         if log.isEnabledFor(logging.DEBUG):
-            iteraciones = int(output.sum(dtype=np.int64)) + output.size
-            log.debug("Perturbación %s: %d niveles BLA, %d pasos para %d iteraciones (x%.1f)",
-                      "floatexp" if modo else "double", orbita.niveles, pasos, iteraciones,
-                      iteraciones / max(1, pasos))
+            total = int(iteraciones.sum(dtype=np.int64)) + iteraciones.size
+            log.debug("Perturbación %s %s: %d niveles BLA, %d pasos para %d iteraciones (x%.1f)",
+                      orbita.formula, "floatexp" if modo else "double", orbita.niveles, pasos, total,
+                      total / max(1, pasos))
+
+    def _salidas_pedidas(self) -> int:
+        return (SALIDA_SUAVE if self.pedir_suave else 0) | (SALIDA_DERIVADA if self.pedir_derivada else 0)
+
+    def _resultado(self, iteraciones, suave, distancia, nx, ny, salidas) -> Resultado:
+        con_derivada = bool(salidas & SALIDA_DERIVADA)
+        return Resultado(iteraciones,
+                         suave if salidas & SALIDA_SUAVE else None,
+                         distancia if con_derivada else None,
+                         nx if con_derivada else None,
+                         ny if con_derivada else None)
+
+    def _render_perturbacion(self, formula: str, en_gpu: bool) -> Resultado:
+        """Render por perturbación de cualquier fórmula de FORMULAS, en CPU o GPU."""
+        orbita, modo, dc = self._preparar_perturbacion(formula)
+        salidas = self._salidas_pedidas()
+        forma = (self.height, self.width)
+        # Las salidas que no se piden se reemplazan por una matriz mínima (no se escriben)
+        forma_extra = lambda bit: forma if salidas & bit else (1, 1)
+
+        if not en_gpu:
+            iteraciones = np.empty(forma, dtype=np.int32)
+            suave = np.empty(forma_extra(SALIDA_SUAVE), dtype=np.float32)
+            distancia, nx, ny = (np.empty(forma_extra(SALIDA_DERIVADA), dtype=np.float32) for _ in range(3))
+            pasos = cpp.pert_render(
+                orbita.h, *dc[0], *dc[1], *dc[2], *dc[3], *dc[4],
+                self.width, self.height, self.max_iter, salidas,
+                iteraciones, suave, distancia, nx, ny
+            )
+        else:
+            Z, tabla, off, cnt = orbita.en_gpu()
+            iteraciones = cp.empty(forma, dtype=cp.int32)
+            suave = cp.empty(forma_extra(SALIDA_SUAVE), dtype=cp.float32)
+            distancia, nx, ny = (cp.empty(forma_extra(SALIDA_DERIVADA), dtype=cp.float32) for _ in range(3))
+            pasos_gpu = cp.zeros(1, dtype=cp.uint64)
+            argumentos_dc = []
+            for mantisa, exponente in dc:
+                argumentos_dc += [np.float64(mantisa), np.int32(exponente)]
+            bloque = (16, 16)
+            grilla = ((self.width + 15) // 16, (self.height + 15) // 16)
+            kernel_perturbacion(formula, modo)(grilla, bloque, (
+                Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
+                *argumentos_dc, np.float64(orbita.k[0]), np.float64(orbita.k[1]),
+                np.int32(self.width), np.int32(self.height), np.int32(self.max_iter), np.int32(salidas),
+                iteraciones, suave, distancia, nx, ny, pasos_gpu
+            ))
+            iteraciones, suave, distancia, nx, ny = (x.get() for x in (iteraciones, suave, distancia, nx, ny))
+            pasos = int(pasos_gpu.get()[0])
+
+        self._log_perturbacion(orbita, modo, pasos, iteraciones)
+        return self._resultado(iteraciones, suave, distancia, nx, ny, salidas)
 
     @register_fractal("Mandelbrot", "perturbacion_cpu", requiere="perturbacion.dll")
     @medir_tiempo("Mandelbrot Perturbacion CPU")
-    def hacer_mandelbrot_perturbacion_cpu(self) -> np.ndarray:
-        orbita, modo, dc = self._preparar_perturbacion()
-        output = np.empty((self.height, self.width), dtype=np.int32)
-        pasos = cpp.pert_render(
-            orbita.h, *dc[0], *dc[1], *dc[2], *dc[3],
-            self.width, self.height, self.max_iter, output
-        )
-        self._log_perturbacion(orbita, modo, pasos, output)
-        return output
+    def hacer_mandelbrot_perturbacion_cpu(self) -> Resultado:
+        return self._render_perturbacion("mandelbrot", en_gpu=False)
 
     @register_fractal("Mandelbrot", "perturbacion_gpu", requiere=("gpu", "perturbacion.dll"))
     @medir_tiempo("Mandelbrot Perturbacion GPU")
-    def hacer_mandelbrot_perturbacion_gpu(self) -> np.ndarray:
-        orbita, modo, dc = self._preparar_perturbacion()
-        Z, tabla, off, cnt = orbita.en_gpu()
-        output = cp.empty((self.height, self.width), dtype=cp.int32)
-        pasos = cp.zeros(1, dtype=cp.uint64)
-        argumentos_dc = []
-        for mantisa, exponente in dc:
-            argumentos_dc += [np.float64(mantisa), np.int32(exponente)]
-        bloque = (16, 16)
-        grilla = ((self.width + 15) // 16, (self.height + 15) // 16)
-        kernel_perturbacion(modo)(grilla, bloque, (
-            Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
-            *argumentos_dc,
-            np.int32(self.width), np.int32(self.height), np.int32(self.max_iter),
-            output, pasos
-        ))
-        output = output.get()
-        self._log_perturbacion(orbita, modo, int(pasos.get()[0]), output)
-        return output
+    def hacer_mandelbrot_perturbacion_gpu(self) -> Resultado:
+        return self._render_perturbacion("mandelbrot", en_gpu=True)
 
     @register_fractal("Mandelbrot", "gmp", requiere="gmp_puro.dll")
     @medir_tiempo("Gmp")

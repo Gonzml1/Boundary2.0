@@ -1,14 +1,74 @@
 import logging
-
-import numpy as np
-from PyQt5.QtWidgets import QOpenGLWidget
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from OpenGL.GL import *
-from core.modulo_de_calculo_fractales import calculos_mandelbrot
-from core.paletas import PALETTE_REGISTRY
+import threading
+from dataclasses import replace
 from decimal import Decimal
 
+from PyQt5.QtWidgets import QOpenGLWidget
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
+from OpenGL.GL import *
+
+from core.modulo_de_calculo_fractales import calculos_mandelbrot
+from core.paletas import PALETTE_REGISTRY
+from core.render import renderizar, PedidoRender, OpcionesColor
+
 log = logging.getLogger(__name__)
+
+# Vista inicial
+VISTA_INICIAL = (Decimal('-2.0'), Decimal('1.2'), Decimal('-0.9'), Decimal('0.9'))
+
+# Calidad progresiva: cada pedido se renderiza primero chico y después a tamaño completo.
+# Divisor de resolución de cada nivel (el último es la calidad final, con antialiasing si está activo).
+NIVELES_CALIDAD = (8, 2, 1)
+
+
+class HiloRender(QThread):
+    """Renderiza en segundo plano. Atiende siempre el pedido más reciente: si llegan varios
+    mientras está ocupado, los viejos se descartan."""
+    listo = pyqtSignal(object, object)    # (PedidoPantalla, ImagenRender)
+    fallo = pyqtSignal(object, str)       # (PedidoPantalla, mensaje)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._candado = threading.Lock()
+        self._hay_pedido = threading.Event()
+        self._pendiente = None
+        self._salir = False
+
+    def pedir(self, pedido_pantalla) -> None:
+        with self._candado:
+            self._pendiente = pedido_pantalla
+        self._hay_pedido.set()
+
+    def detener(self) -> None:
+        self._salir = True
+        self._hay_pedido.set()
+        self.wait()
+
+    def run(self):
+        # Motor propio del hilo: el motor guarda estado (cachés de órbita) y no se comparte
+        motor = calculos_mandelbrot(*VISTA_INICIAL, 1, 1, 1, "", "")
+        while True:
+            self._hay_pedido.wait()
+            with self._candado:
+                pp, self._pendiente = self._pendiente, None
+                self._hay_pedido.clear()
+            if self._salir:
+                return
+            if pp is None:
+                continue
+            try:
+                self.listo.emit(pp, renderizar(motor, pp.pedido))
+            except Exception as e:
+                log.exception("Fallo calculando '%s / %s'", pp.pedido.tipo_fractal, pp.pedido.tipo_calculo)
+                self.fallo.emit(pp, str(e))
+
+
+class PedidoPantalla:
+    """Un pedido de la pantalla: la versión de la vista que lo originó y su nivel de calidad."""
+    __slots__ = ("version", "nivel", "pedido")
+
+    def __init__(self, version: int, nivel: int, pedido: PedidoRender):
+        self.version, self.nivel, self.pedido = version, nivel, pedido
 
 
 class MandelbrotWidget(QOpenGLWidget):
@@ -16,146 +76,157 @@ class MandelbrotWidget(QOpenGLWidget):
     coordenadas_raton_cambiadas = pyqtSignal(float, float)
     # Los límites viajan como texto para no perder precisión en zooms profundos
     limites_zoom_cambiados = pyqtSignal(str, str, str, str)
-    parametros_matematicos_cambiados = pyqtSignal(int, int)
+    parametros_matematicos_cambiados = pyqtSignal(int, int)    # max_iter, clase_equiv
+    paleta_cambiada = pyqtSignal(int)
+    # segundos, opciones aplicadas, ancho, alto, ¿es la calidad final?
+    render_terminado = pyqtSignal(float, object, int, int, bool)
+    render_fallido = pyqtSignal(str)
 
-    def __init__(self, cmap, xmin, xmax, ymin, ymax, width, height, max_iter,
-                 tipo_calculo, tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
-        super().__init__()
-        self.cmap = cmap
-        self.xmin = xmin
-        self.xmax = xmax
-        self.ymin = ymin
-        self.ymax = ymax
-        self.width = width
-        self.height = height
-        self.max_iter = max_iter
-        self.tipo_calculo = tipo_calculo
-        self.tipo_fractal = tipo_fractal
-        self.zoom_in = zoom_in
-        self.zoom_out = zoom_out
-        self.clase_equiv = clase_equiv
-        self.real = real
-        self.imag = imag
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.xmin, self.xmax, self.ymin, self.ymax = VISTA_INICIAL
+        self.max_iter = 256
+        self.tipo_calculo = ""
+        self.tipo_fractal = ""
+        self.real = Decimal('-0.8')
+        self.imag = Decimal('0.156')
+        self.palette_index = 0
+        self.clase_equiv = 128
+        self.opciones = OpcionesColor()
+        self.zoom_in = Decimal('0.5')
+        self.zoom_out = Decimal('2.0')
+        self.resolucion_adaptativa_activa = True
 
-        self.zoom_factor = Decimal('1.0')
         self.dragging = False
         self.last_pos = None
 
-        self.mandelbrot = calculos_mandelbrot(
-            self.xmin, self.xmax, self.ymin, self.ymax,
-            self.width, self.height, self.max_iter,
-            self.tipo_calculo, self.tipo_fractal
-        )
+        # Versión de la vista: sube con cada cambio. Solo los resultados de la versión actual
+        # disparan el siguiente nivel de calidad.
+        self._version = 0
+        # Última imagen recibida y la vista que representa (para reproyectarla mientras llega la nueva)
+        self._textura = None
+        self._imagen_pendiente = None
+        self._rect_imagen = None
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
 
-        self.palettes = PALETTE_REGISTRY
-        self.palette_index = 0
-
-        # === NUEVO SISTEMA DE CALIDAD PROGRESIVA ===
-        self.resolucion_adaptativa_activa = True
-        self.quality_level = "high"          # low | medium | high
-        self.render_timer = QTimer(self)
-        self.render_timer.setSingleShot(True)
-        self.render_timer.timeout.connect(self._avanzar_calidad)
-
-        # Tiempos de refinamiento (en milisegundos)
-        self.TIEMPO_MEDIUM = 400
-        self.TIEMPO_HIGH = 1200
+        self._hilo = HiloRender(self)
+        self._hilo.listo.connect(self._al_terminar_render)
+        self._hilo.fallo.connect(self._al_fallar_render)
+        self._hilo.start()
 
     # ============================================================
-    #                    SISTEMA DE CALIDAD PROGRESIVA
+    #                    ESTADO Y PEDIDOS
     # ============================================================
 
-    def _set_quality_level(self, level):
-        """Cambia el nivel de calidad y fuerza redraw"""
-        if level != self.quality_level:
-            self.quality_level = level
-            self.update()
-    def interaccion_rapida(self):
-        """Se llama en cada movimiento/zoom. Mantiene baja calidad mientras el usuario interactúa."""
-        if not self.resolucion_adaptativa_activa:
-            self.update()
+    def configurar(self, **parametros) -> None:
+        """Cambia parámetros que no son la vista (max_iter, tipo_calculo, opciones, ...) y re-renderiza."""
+        for nombre, valor in parametros.items():
+            if not hasattr(self, nombre):
+                raise AttributeError(nombre)
+            setattr(self, nombre, valor)
+        self.solicitar_render()
+
+    def fijar_vista(self, xmin: Decimal, xmax: Decimal, ymin: Decimal, ymax: Decimal) -> None:
+        self.xmin, self.xmax, self.ymin, self.ymax = xmin, xmax, ymin, ymax
+        self.corregir_aspect_ratio()
+        self.solicitar_render()
+
+    def resetear(self) -> None:
+        self.max_iter, self.clase_equiv = 256, 128
+        self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
+        self.fijar_vista(*VISTA_INICIAL)
+
+    def tamano_render(self) -> tuple[int, int]:
+        """Tamaño de la vista en píxeles físicos (considera el escalado de pantalla de Windows)."""
+        escala = self.devicePixelRatioF()
+        return max(1, round(self.width() * escala)), max(1, round(self.height() * escala))
+
+    def pedido_actual(self, ancho: int | None = None, alto: int | None = None, **cambios) -> PedidoRender:
+        """El pedido que representa lo que se ve, opcionalmente con otro tamaño (para exportar)."""
+        if ancho is None:
+            ancho, alto = self.tamano_render()
+        return PedidoRender(
+            self.xmin, self.xmax, self.ymin, self.ymax, ancho, alto, self.max_iter,
+            self.tipo_fractal, self.tipo_calculo, float(self.real), float(self.imag),
+            self.palette_index, self.clase_equiv, self.opciones, **cambios
+        )
+
+    def solicitar_render(self) -> None:
+        """Pide un render nuevo de la vista actual, empezando por la calidad más baja."""
+        if not self.tipo_fractal or not self.tipo_calculo:
             return
+        self._version += 1
+        nivel = 0 if self.resolucion_adaptativa_activa else len(NIVELES_CALIDAD) - 1
+        self._pedir_nivel(nivel)
+        self.update()      # reproyecta la imagen vieja mientras tanto
 
-        self.render_timer.stop()
+    # Compatibilidad con el nombre anterior
+    interaccion_rapida = solicitar_render
 
-        # Forzamos calidad baja inmediatamente
-        if self.quality_level != "low":
-            self.quality_level = "low"
+    def _pedir_nivel(self, nivel: int) -> None:
+        ancho, alto = self.tamano_render()
+        divisor = NIVELES_CALIDAD[nivel]
+        final = nivel == len(NIVELES_CALIDAD) - 1
+        pedido = self.pedido_actual(max(1, ancho // divisor), max(1, alto // divisor))
+        if not final:
+            # El antialiasing solo en la calidad final: en las previas sería trabajo tirado
+            pedido = replace(pedido, opciones=replace(pedido.opciones, antialiasing=False))
+        self._hilo.pedir(PedidoPantalla(self._version, nivel, pedido))
 
-        self.update()                    # ← Esto es clave: redibuja YA en baja calidad
-        self.render_timer.start(self.TIEMPO_MEDIUM)
+    def _al_terminar_render(self, pp: PedidoPantalla, imagen) -> None:
+        p = pp.pedido
+        self._imagen_pendiente = imagen.rgb
+        self._rect_imagen = (p.xmin, p.xmax, p.ymin, p.ymax)
+        final = pp.nivel == len(NIVELES_CALIDAD) - 1
+        self.render_terminado.emit(imagen.segundos, imagen.aplicadas, p.ancho, p.alto, final)
+        if pp.version == self._version and not final:
+            self._pedir_nivel(pp.nivel + 1)
+        self.update()
 
-    def _avanzar_calidad(self):
-        """Solo se ejecuta cuando el usuario deja de interactuar por un tiempo."""
-        if self.quality_level == "low":
-            self.quality_level = "medium"
-            self.update()
-            self.render_timer.start(self.TIEMPO_HIGH - self.TIEMPO_MEDIUM)
-        elif self.quality_level == "medium":
-            self.quality_level = "high"
-            self.update()
+    def _al_fallar_render(self, pp: PedidoPantalla, mensaje: str) -> None:
+        if pp.version == self._version:
+            self.render_fallido.emit(mensaje)
+
+    def detener(self) -> None:
+        self._hilo.detener()
+
+    # ============================================================
+    #                    PALETAS Y CALIDAD
+    # ============================================================
 
     def toggle_resolucion_adaptativa(self):
-        """Activa/desactiva el modo adaptativo (tecla Q)"""
+        """Activa/desactiva la calidad progresiva (tecla Q)"""
         self.resolucion_adaptativa_activa = not self.resolucion_adaptativa_activa
-        if not self.resolucion_adaptativa_activa:
-            self.quality_level = "high"
-            self.render_timer.stop()
-        self.update()
-
-    # ============================================================
-
-    def actualizar_estado_desde_ui(self, cmap, width, height, max_iter, tipo_calculo,
-                                   tipo_fractal, zoom_in, zoom_out, clase_equiv, real, imag):
-        self.cmap = cmap
-        self.width = width
-        self.height = height
-        self.max_iter = max_iter
-        self.tipo_calculo = tipo_calculo
-        self.tipo_fractal = tipo_fractal
-        self.zoom_in = zoom_in
-        self.zoom_out = zoom_out
-        self.clase_equiv = clase_equiv
-        self.real = real
-        self.imag = imag
+        self.solicitar_render()
 
     def next_palette(self):
-        self.palette_index = (self.palette_index + 1) % len(self.palettes)
-        self.update()
+        self._cambiar_paleta(1)
 
     def previous_palette(self):
-        self.palette_index = (self.palette_index - 1) % len(self.palettes)
-        self.update()
+        self._cambiar_paleta(-1)
 
-    def obtener_frame_rgb(self, render_w, render_h):
-        self.mandelbrot.actualizar_fractal(
-            self.xmin, self.xmax, self.ymin, self.ymax,
-            render_w, render_h, self.max_iter, self.tipo_calculo,
-            self.tipo_fractal, self.real, self.imag
-        )
-        data = self.mandelbrot.calcular_fractal()
-        norm = data.astype(float) / self.max_iter
-        _, func = self.palettes[self.palette_index]
-        return func(norm, self.max_iter, self.clase_equiv)
+    def _cambiar_paleta(self, paso: int):
+        self.palette_index = (self.palette_index + paso) % len(PALETTE_REGISTRY)
+        self.paleta_cambiada.emit(self.palette_index)
+        self.solicitar_render()
 
-    def initializeGL(self):
-        glClearColor(0, 0, 0, 1)
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+    # ============================================================
+    #                    COORDENADAS
+    # ============================================================
 
     def pixel_a_complejo(self, x, y):
-        prop_x = Decimal(x) / Decimal(self.width)
-        prop_y = Decimal('1') - (Decimal(y) / Decimal(self.height))
+        prop_x = Decimal(x) / Decimal(max(1, self.width()))
+        prop_y = Decimal('1') - (Decimal(y) / Decimal(max(1, self.height())))
         real = self.xmin + prop_x * (self.xmax - self.xmin)
         imag = self.ymin + prop_y * (self.ymax - self.ymin)
         return real, imag
 
     def corregir_aspect_ratio(self):
-        if self.height == 0:
+        if self.height() == 0:
             return
-        aspect_ratio = Decimal(self.width) / Decimal(self.height)
+        aspect_ratio = Decimal(self.width()) / Decimal(self.height())
         centro_y = (self.ymin + self.ymax) / Decimal('2')
         ancho_actual = self.xmax - self.xmin
         alto_corregido = ancho_actual / aspect_ratio
@@ -175,52 +246,60 @@ class MandelbrotWidget(QOpenGLWidget):
             return texto.rstrip('0').rstrip('.') if '.' in texto else texto
         return tuple(formatear(v) for v in (self.xmin, self.xmax, self.ymin, self.ymax))
 
+    # ============================================================
+    #                    OPENGL
+    # ============================================================
+
+    def initializeGL(self):
+        glClearColor(0x1c / 255, 0x1c / 255, 0x1f / 255, 1)  # mismo fondo que el tema
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
+        self._textura = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self._textura)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
     def paintGL(self):
         glClear(GL_COLOR_BUFFER_BIT)
-        glLoadIdentity()
-
-        # === Determinar resolución según nivel de calidad ===
-        if self.quality_level == "low":
-            factor = 8.0
-        elif self.quality_level == "medium":
-            factor = 2.0
-        else:  # high
-            factor = 1.0
-
-        render_w = max(1, int(self.width / factor))
-        render_h = max(1, int(self.height / factor))
-
-        # Se pasan los Decimal tal cual: el motor guarda la versión float para los backends
-        # comunes y la de alta precisión para perturbación/GMP.
-        self.mandelbrot.actualizar_fractal(
-            self.xmin, self.xmax, self.ymin, self.ymax,
-            render_w, render_h, self.max_iter,
-            self.tipo_calculo, self.tipo_fractal, self.real, self.imag
-        )
-
-        try:
-            data = self.mandelbrot.calcular_fractal()
-        except Exception:
-            # Una excepción sin atrapar dentro de paintGL cierra la app entera (PyQt5)
-            log.exception("Fallo calculando '%s / %s'", self.tipo_fractal, self.tipo_calculo)
-            glClearColor(1.0, 0.0, 0.0, 1.0)
-            glClear(GL_COLOR_BUFFER_BIT)
+        if self._imagen_pendiente is not None:
+            rgb = self._imagen_pendiente
+            self._imagen_pendiente = None
+            glBindTexture(GL_TEXTURE_2D, self._textura)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rgb.shape[1], rgb.shape[0], 0,
+                         GL_RGB, GL_UNSIGNED_BYTE, rgb)
+        if self._rect_imagen is None:
             return
 
-        norm = data / self.max_iter
-        _, func = self.palettes[self.palette_index]
-        rgb = func(norm, self.max_iter, self.clase_equiv)
+        # Dónde cae la última imagen dentro de la vista actual (0..1 en cada eje). Si la vista
+        # cambió desde que se pidió, la imagen se ve corrida/escalada hasta que llegue la nueva.
+        ixmin, ixmax, iymin, iymax = self._rect_imagen
+        ancho, alto = self.xmax - self.xmin, self.ymax - self.ymin
+        if ancho == 0 or alto == 0:
+            return
+        x0, x1 = float((ixmin - self.xmin) / ancho), float((ixmax - self.xmin) / ancho)
+        y0, y1 = float((iymin - self.ymin) / alto), float((iymax - self.ymin) / alto)
 
-        glPixelZoom(factor, factor)
-        glDrawPixels(render_w, render_h, GL_RGB, GL_UNSIGNED_BYTE, rgb)
-        glPixelZoom(1.0, 1.0)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        glOrtho(0, 1, 0, 1, -1, 1)
+        glMatrixMode(GL_MODELVIEW)
+        glLoadIdentity()
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, self._textura)
+        glColor3f(1, 1, 1)
+        # La fila 0 de la imagen es ymin: va abajo
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 0); glVertex2f(x0, y0)
+        glTexCoord2f(1, 0); glVertex2f(x1, y0)
+        glTexCoord2f(1, 1); glVertex2f(x1, y1)
+        glTexCoord2f(0, 1); glVertex2f(x0, y1)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
 
     def resizeGL(self, w, h):
-        self.width = w
-        self.height = h
-        glViewport(0, 0, w, h)
         self.corregir_aspect_ratio()
-        self.update()
+        self.solicitar_render()
 
     # ==================== EVENTOS DE MOUSE Y TECLADO ====================
 
@@ -230,9 +309,9 @@ class MandelbrotWidget(QOpenGLWidget):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self._centrar_y_zoom(event.x(), self.height - event.y(), self.zoom_in)
+            self._centrar_y_zoom(event.x(), self.height() - event.y(), self.zoom_in)
         elif event.button() == Qt.RightButton:
-            self._centrar_y_zoom(event.x(), self.height - event.y(), self.zoom_out)
+            self._centrar_y_zoom(event.x(), self.height() - event.y(), self.zoom_out)
         elif event.button() == Qt.MiddleButton:
             self.dragging = True
             self.last_pos = event.pos()
@@ -249,14 +328,15 @@ class MandelbrotWidget(QOpenGLWidget):
         if self.dragging:
             c0_real, c0_imag = self.pixel_a_complejo(self.last_pos.x(), self.last_pos.y())
             dx = c0_real - real
-            dy = c0_imag - imag          # ← CORREGIDO (antes decía "- real")
+            dy = c0_imag - imag
             self.xmin += dx
             self.xmax += dx
             self.ymin += dy
             self.ymax += dy
             self.last_pos = event.pos()
             self._emitir_limites()
-            self.interaccion_rapida()
+            self.solicitar_render()
+
     def _aplicar_zoom(self, factor):
         factor_dec = Decimal(str(factor))
         c_x, c_y = (self.xmin + self.xmax) / Decimal('2'), (self.ymin + self.ymax) / Decimal('2')
@@ -265,12 +345,12 @@ class MandelbrotWidget(QOpenGLWidget):
         self.xmin, self.xmax = c_x - dx, c_x + dx
         self.ymin, self.ymax = c_y - dy, c_y + dy
         self._emitir_limites()
-        self.interaccion_rapida()
+        self.solicitar_render()
 
     def _centrar_y_zoom(self, px, py, factor):
         factor_dec = Decimal(str(factor))
-        prop_x = Decimal(px) / Decimal(self.width)
-        prop_y = Decimal(py) / Decimal(self.height)
+        prop_x = Decimal(px) / Decimal(max(1, self.width()))
+        prop_y = Decimal(py) / Decimal(max(1, self.height()))
         c_x = self.xmin + prop_x * (self.xmax - self.xmin)
         c_y = self.ymin + prop_y * (self.ymax - self.ymin)
         self.xmin = c_x - (c_x - self.xmin) * factor_dec
@@ -278,51 +358,54 @@ class MandelbrotWidget(QOpenGLWidget):
         self.ymin = c_y - (c_y - self.ymin) * factor_dec
         self.ymax = c_y + (self.ymax - c_y) * factor_dec
         self._emitir_limites()
-        self.interaccion_rapida()
+        self.solicitar_render()
 
     def keyPressEvent(self, event):
         move = Decimal('0.05')
         dx, dy = (self.xmax - self.xmin) * move, (self.ymax - self.ymin) * move
+        tecla = event.key()
 
-        if event.key() in (Qt.Key_Left, Qt.Key_A):
+        if tecla in (Qt.Key_Left, Qt.Key_A):
             self.xmin, self.xmax = self.xmin - dx, self.xmax - dx
-        elif event.key() in (Qt.Key_Right, Qt.Key_D):
+        elif tecla in (Qt.Key_Right, Qt.Key_D):
             self.xmin, self.xmax = self.xmin + dx, self.xmax + dx
-        elif event.key() in (Qt.Key_Up, Qt.Key_W):
+        elif tecla in (Qt.Key_Up, Qt.Key_W):
             self.ymin, self.ymax = self.ymin + dy, self.ymax + dy
-        elif event.key() in (Qt.Key_Down, Qt.Key_S):
+        elif tecla in (Qt.Key_Down, Qt.Key_S):
             self.ymin, self.ymax = self.ymin - dy, self.ymax - dy
-        elif event.key() == Qt.Key_Plus:
+        elif tecla == Qt.Key_Plus:
             self._aplicar_zoom(self.zoom_in)
-        elif event.key() == Qt.Key_Minus:
+            return
+        elif tecla == Qt.Key_Minus:
             self._aplicar_zoom(self.zoom_out)
-        elif event.key() == Qt.Key_P:
+            return
+        elif tecla == Qt.Key_P:
             self.next_palette()
-        elif event.key() == Qt.Key_O:
+            return
+        elif tecla == Qt.Key_O:
             self.previous_palette()
-        elif event.key() == Qt.Key_R:
-            self.xmin, self.xmax = Decimal('-2.0'), Decimal('1.2')
-            self.ymin, self.ymax = Decimal('-0.9'), Decimal('0.9')
-            self.max_iter, self.clase_equiv = 256, 128
-            self.corregir_aspect_ratio()
+            return
+        elif tecla == Qt.Key_R:
+            self.resetear()
+            return
+        elif tecla in (Qt.Key_G, Qt.Key_H, Qt.Key_B, Qt.Key_N):
+            if tecla == Qt.Key_G:
+                self.max_iter = int(self.max_iter * 2)
+            elif tecla == Qt.Key_H:
+                self.max_iter = max(1, int(self.max_iter / 2))
+            elif tecla == Qt.Key_B:
+                self.clase_equiv = int(self.clase_equiv * 2)
+            else:
+                self.clase_equiv = max(1, int(self.clase_equiv / 2))
             self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_G:
-            self.max_iter = int(self.max_iter * 2)
-            self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_H:
-            self.max_iter = max(1, int(self.max_iter / 2))
-            self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_B:
-            self.clase_equiv = int(self.clase_equiv * 2)
-            self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_N:
-            self.clase_equiv = max(1, int(self.clase_equiv / 2))
-            self.parametros_matematicos_cambiados.emit(self.max_iter, self.clase_equiv)
-        elif event.key() == Qt.Key_Q:
+        elif tecla == Qt.Key_Q:
             self.toggle_resolucion_adaptativa()
+            return
+        else:
+            super().keyPressEvent(event)
+            return
 
-        if event.key() in (Qt.Key_Left, Qt.Key_A, Qt.Key_Right, Qt.Key_D,
-                           Qt.Key_Up, Qt.Key_W, Qt.Key_Down, Qt.Key_S):
+        if tecla in (Qt.Key_Left, Qt.Key_A, Qt.Key_Right, Qt.Key_D,
+                     Qt.Key_Up, Qt.Key_W, Qt.Key_Down, Qt.Key_S):
             self._emitir_limites()
-
-        self.interaccion_rapida()
+        self.solicitar_render()

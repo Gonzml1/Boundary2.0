@@ -48,18 +48,49 @@ y el log dice qué se omitió.
 | `Q` | Activar/desactivar la calidad progresiva |
 | `R` | Volver a la vista inicial |
 
+### Opciones de color (panel "4. COLOR")
+
+Las tres se activan y desactivan por separado. Funcionan con los métodos de perturbación
+(`perturbacion_cpu` / `perturbacion_gpu`); con los demás, la barra de estado avisa que no aplican.
+
+- **Coloreo suave**: usa la iteración continua `n + 1 - log2(ln|z|)` en vez del entero. Así desaparecen
+  las bandas. Se calcula siguiendo 4 iteraciones después del escape, sin cambiar el conteo de iteraciones.
+- **Iluminación (estimador de distancia)**: sigue la derivada `dz/dc` durante la iteración (también a
+  través de los saltos del BLA, donde se transforma como `der -> A der + B`). Con ella calcula la
+  normal del "relieve" (dirección de `z / dz/dc`), que se ilumina desde el ángulo elegido, y la
+  distancia al borde, que oscurece lo que está a menos de un píxel del conjunto.
+- **Antialiasing (2x2)**: renderiza al doble de resolución y promedia. Cuesta 4 veces más, así que en
+  pantalla se aplica solo a la calidad final.
+
+Las opciones se respetan igual en pantalla, en "Guardar imagen" y en el video.
+
+### Favoritos
+
+"Guardar" en el panel de favoritos guarda la vista con todos sus dígitos, las iteraciones, el
+fractal, el método, la paleta y las opciones en `favoritos.json`, en la raíz del proyecto. Ese
+archivo no se versiona.
+
 ## Estructura
 
 ```
-iniciador.py                     punto de entrada
-gui/                             ventana principal (gui.py) y la UI generada por Qt Designer
-core/modulo_opengl.py            widget OpenGL: interacción, zoom y calidad progresiva
+iniciador.py                         punto de entrada
+gui/gui.py                           ventana principal: conecta los controles con el widget
+gui/MandelbrotGUI.ui                 la interfaz (Qt Designer); MandelbrotGUI.py se genera de acá
+gui/tema_oscuro.py                   tema visual
+core/modulo_opengl.py                widget OpenGL + hilo de render (calidad progresiva)
+core/render.py                       pedido -> imagen: cálculo + paleta + suave + luz + antialiasing
 core/modulo_de_calculo_fractales.py  motor de cálculo y registro de fractales
-core/funciones_kernel.py         kernels CuPy
-core/backend_cpp.py              carga de las DLL
-core/paletas.py                  paletas de color
-codigos_cpp/                     fuentes C++ de los backends de CPU
+core/funciones_kernel.py             kernels CuPy
+core/backend_cpp.py                  carga de las DLL
+core/paletas.py                      paletas de color
+core/video.py                        planificación del video de zoom
+core/favoritos.py                    ubicaciones guardadas
+codigos_cpp/                         fuentes C++ (perturbacion_core.h: núcleo compartido CPU/GPU)
 ```
+
+El cálculo nunca corre en el hilo de la interfaz. El widget arma un `PedidoRender` (una foto inmutable
+de lo que hay que dibujar) y se lo pasa al hilo de render, que atiende siempre el más reciente. Mientras
+llega la imagen nueva, el widget reproyecta la anterior, así el zoom y el arrastre responden al instante.
 
 ### Agregar un fractal o un backend
 
@@ -70,7 +101,7 @@ aparece solo en la UI.
 @register_fractal("Mandelbrot", "Mi_metodo", requiere="gpu")   # o "mi.dll", o ("gpu", "mi.dll")
 @medir_tiempo("Mi método")
 def hacer_mi_metodo(self) -> np.ndarray:
-    ...  # devolver una matriz (height, width) de iteraciones
+    ...  # devolver una matriz (height, width) de iteraciones, o un Resultado con más salidas
 ```
 
 Lo mismo con las paletas y `@register_palette` en `core/paletas.py`.
@@ -117,6 +148,26 @@ Resultados medidos (comparados píxel a píxel con el cálculo de GMP puro, `gmp
 
 En zooms poco profundos (< 1e-20) el BLA casi no saltea nada, porque `dz` deja de ser chico enseguida.
 Ahí puede ser algo más lento que sin BLA. Para desactivarlo: `calculos_mandelbrot.bla_epsilon = 0`.
+
+### Agregar una fórmula a la perturbación (Julia, Burning Ship, ...)
+
+Todo el núcleo (rebasing, BLA, floatexp, suave, derivada, CPU y GPU) es genérico sobre la fórmula.
+Una fórmula nueva necesita:
+
+1. Una estructura en `perturbacion_core.h` con su perturbación, su derivada, su paso completo y sus
+   coeficientes de BLA (o `tiene_bla = false`). La de `Mandelbrot` sirve de modelo.
+2. Su paso de la órbita de referencia en GMP, en `perturbacion.cpp`.
+3. Agregarla en los lugares marcados con `FORMULAS`: los `switch` de `perturbacion.cpp`,
+   `KERNELS_FORMULA(...)` en `core/funciones_kernel.py` y el diccionario `FORMULAS` en Python.
+4. Registrarla en dos líneas:
+
+```python
+@register_fractal("Julia", "perturbacion_gpu", requiere=("gpu", "perturbacion.dll"))
+def hacer_julia_perturbacion_gpu(self):
+    return self._render_perturbacion("julia", en_gpu=True)
+```
+
+El parámetro de la fórmula (la `c` de Julia) llega desde los campos "Julia Re(c) / Im(c)" de la interfaz.
 
 El límite práctico ahora es la precisión de las coordenadas (`PRECISION_DECIMAL`, ~1e-1050) y la
 cantidad de iteraciones que pidas.

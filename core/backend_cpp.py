@@ -61,7 +61,7 @@ mandelbrot_cpp = free_mandelbrot = None
 julia_cpp = free_julia = None
 burning_ship_cpp = free_burning_ship = None
 circulo_cpp = free_circulo = None
-pert_crear = pert_largo = pert_liberar = pert_preparar_bla = pert_render = None
+pert_crear = pert_parametro = pert_largo = pert_liberar = pert_preparar_bla = pert_render = None
 pert_bytes_orbita = pert_bytes_bla = pert_exportar = None
 calcular_mandelbrot_gmp_puro = None
 
@@ -94,18 +94,27 @@ if _perturbacion:
     # Ver codigos_cpp/perturbacion.cpp. Los números que pueden ser muy chicos (dc, pasos)
     # viajan como (mantisa double, exponente int) para no perderlos por underflow.
     _FE = [ctypes.c_double, ctypes.c_int]
+    # (formula, c_re, c_im, k_re, k_im, max_iter, bits) -> handle
     pert_crear = _perturbacion.wrap_func(
-        'pert_crear', [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int, ctypes.c_int], ctypes.c_void_p
+        'pert_crear', [ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
+                       ctypes.c_int, ctypes.c_int], ctypes.c_void_p
+    )
+    pert_parametro = _perturbacion.wrap_func(
+        'pert_parametro', [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)], None
     )
     pert_largo = _perturbacion.wrap_func('pert_largo', [ctypes.c_void_p], ctypes.c_int)
     pert_liberar = _perturbacion.wrap_func('pert_liberar', [ctypes.c_void_p], None)
     pert_preparar_bla = _perturbacion.wrap_func(
         'pert_preparar_bla', [ctypes.c_void_p, ctypes.c_int, *_FE, ctypes.c_double], ctypes.c_int
     )
+    _MATRIZ_F32 = np.ctypeslib.ndpointer(dtype=np.float32, ndim=2, flags='C_CONTIGUOUS')
+    # (h, dc_x_base, dc_y_base, step_x, step_y, paso_pixel, width, height, max_iter, salidas,
+    #  iter, suave, distancia, nx, ny) -> pasos
     pert_render = _perturbacion.wrap_func(
         'pert_render',
-        [ctypes.c_void_p, *_FE, *_FE, *_FE, *_FE,
-         ctypes.c_int, ctypes.c_int, ctypes.c_int, _MATRIZ_I32],
+        [ctypes.c_void_p, *_FE, *_FE, *_FE, *_FE, *_FE,
+         ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+         _MATRIZ_I32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32],
         ctypes.c_longlong
     )
     pert_bytes_orbita = _perturbacion.wrap_func('pert_bytes_orbita', [ctypes.c_void_p], ctypes.c_longlong)

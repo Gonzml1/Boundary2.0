@@ -1,16 +1,18 @@
 // Núcleo de la perturbación, compartido entre la DLL de CPU (perturbacion.cpp) y el kernel
-// de GPU (se compila con NVRTC desde core/modulo_de_calculo_fractales.py).
+// de GPU (se compila con NVRTC desde core/funciones_kernel.py).
 //
-// Tres piezas:
+// Cuatro piezas:
 //   1. Tipos numéricos: complejo double (CD) y complejo "floatexp" (CFE), un double con un
 //      exponente entero aparte. El floatexp no tiene underflow, así que deja hacer zooms
 //      mucho más allá de 1e-308.
-//   2. BLA (bilinear approximation): mientras dz es chico frente a Z, la iteración es casi
+//   2. Fórmulas: cada fractal (Mandelbrot, y a futuro Julia, Burning Ship...) es una estructura
+//      que dice cómo se perturba, cómo se deriva y cómo se linealiza. Todo lo demás es genérico.
+//   3. BLA (bilinear approximation): mientras dz es chico frente a Z, la iteración es casi
 //      lineal, dz -> A dz + B dc, y varios pasos lineales se componen en uno solo. Se arma
 //      una tabla de saltos de 1, 2, 4, 8... iteraciones y cada píxel usa el salto más largo
 //      que siga siendo válido. Así se saltean miles de iteraciones de golpe.
-//   3. La iteración de un píxel: BLA cuando se puede, perturbación normal cuando no,
-//      y rebasing para evitar glitches.
+//   4. La iteración de un píxel: BLA cuando se puede, perturbación normal cuando no,
+//      rebasing para evitar glitches, y al final el valor suave, la distancia y la normal.
 //
 // Referencia: Claude Heiland-Allen, "Deep zoom theory and practice" (mathr.co.uk, 2021).
 #pragma once
@@ -20,6 +22,7 @@
 #else
   #include <cmath>
   using std::frexp; using std::ldexp; using std::fabs; using std::fmax; using std::sqrt;
+  using std::log; using std::log2;
   #define HD inline
 #endif
 
@@ -51,11 +54,14 @@ HD FE operator+(FE a, FE b) {
 }
 HD FE operator-(FE a, FE b) { b.m = -b.m; return a + b; }
 HD double a_double(FE a) { return ldexp(a.m, a.e); }
+HD double a_double(double a) { return a; }
 
 // --- CD ---
 HD CD operator+(CD a, CD b) { CD r = {a.re + b.re, a.im + b.im}; return r; }
 HD CD operator*(CD a, CD b) { CD r = {a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re}; return r; }
+HD CD operator-(CD a, CD b) { CD r = {a.re - b.re, a.im - b.im}; return r; }
 HD CD doble(CD a) { CD r = {2.0 * a.re, 2.0 * a.im}; return r; }
+HD CD conjugado(CD a) { a.im = -a.im; return a; }
 
 // --- CFE ---
 HD CFE cfe_normalizar(double re, double im, int e) {
@@ -77,7 +83,9 @@ HD CFE operator+(CFE a, CFE b) {
 HD CFE operator*(CFE a, CFE b) {
     return cfe_normalizar(a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re, a.e + b.e);
 }
+HD CFE operator-(CFE a, CFE b) { b.re = -b.re; b.im = -b.im; return a + b; }
 HD CFE doble(CFE a) { a.e += 1; return a; }
+HD CFE conjugado(CFE a) { a.im = -a.im; return a; }
 
 // --- Operaciones genéricas: cada tipo complejo C tiene un tipo real R asociado ---
 // norma2 = |z|^2, modulo = |z|, cota = sqrt(2) * max(|re|, |im|) >= |z| (barata y sin underflow)
@@ -90,6 +98,17 @@ HD FE   norma2(CFE a) { return fe_normalizar(a.re * a.re + a.im * a.im, 2 * a.e)
 HD FE   modulo(CFE a) { return fe_normalizar(sqrt(a.re * a.re + a.im * a.im), a.e); }
 HD FE   cota(CFE a)   { return fe_normalizar(1.4142135623730951 * fmax(fabs(a.re), fabs(a.im)), a.e); }
 HD bool finito(CFE a) { return finito(a.re) && finito(a.im); }
+
+// Dirección (vector unitario) de un complejo, sin overflow aunque sea enorme
+HD void direccion(double re, double im, float* nx, float* ny) {
+    double s = fmax(fabs(re), fabs(im));
+    if (s == 0.0 || !finito(s)) { *nx = 0.0f; *ny = 0.0f; return; }
+    re /= s; im /= s;
+    double m = sqrt(re * re + im * im);
+    *nx = (float)(re / m); *ny = (float)(im / m);
+}
+HD void direccion(CD a, float* nx, float* ny)  { direccion(a.re, a.im, nx, ny); }
+HD void direccion(CFE a, float* nx, float* ny) { direccion(a.re, a.im, nx, ny); }
 
 // Comparaciones. menor_pos asume a, b >= 0 (normas, radios): es la rápida, la que se usa por iteración.
 HD bool menor_pos(double a, double b) { return a < b; }
@@ -124,6 +143,41 @@ template<> HD CFE complejo_fe<CFE>(FE re, FE im) {
 }
 
 // ---------------------------------------------------------------------------
+// Fórmulas
+// ---------------------------------------------------------------------------
+// Una fórmula es una estructura con funciones estáticas. Con la órbita de referencia Z y la
+// diferencia dz de cada píxel (z = Z + dz):
+//
+//   dz_inicial(dc)      dz en la iteración 0
+//   der_inicial()       derivada d(dz)/d(dc) en la iteración 0
+//   paso(Z, dz, dc)     dz en la iteración siguiente (la perturbación)
+//   derivada(z, der)    derivada en la iteración siguiente, con z el valor completo
+//   paso_completo(z, c) una iteración sin perturbar (para seguir iterando después del escape)
+//   c_completo(k, dc)   el "c" de ese paso_completo para el píxel (k: parámetro de la fórmula)
+//   tiene_bla / bla(Z)  si se puede linealizar y con qué coeficientes: dz' ~ A dz + B dc
+//
+// La órbita de referencia en alta precisión (GMP) vive en perturbacion.cpp.
+//
+// Para agregar una fórmula: escribir su estructura acá, su paso de referencia en
+// perturbacion.cpp e instanciarla en los lugares marcados con "FORMULAS".
+
+struct Mandelbrot {
+    // z' = z^2 + c, con z_0 = 0. El píxel varía c: dc.
+    static const bool tiene_bla = true;
+    template<class C> HD static C dz_inicial(C)  { return complejo<C>(0.0, 0.0); }
+    template<class C> HD static C der_inicial()  { return complejo<C>(0.0, 0.0); }
+    // dz' = (2 Z + dz) dz + dc
+    template<class C> HD static C paso(C Z, C dz, C dc) { return (doble(Z) + dz) * dz + dc; }
+    // der' = 2 z der + 1
+    template<class C> HD static C derivada(C z, C der) { return doble(z) * der + complejo<C>(1.0, 0.0); }
+    template<class C> HD static C paso_completo(C z, C c) { return z * z + c; }
+    // k es el centro de la vista (la c de la referencia)
+    template<class C> HD static C c_completo(C k, C dc) { return k + dc; }
+    // El término que se descarta es dz^2: dz' ~ 2 Z dz + dc
+    template<class C> HD static void bla(C Z, C* A, C* B) { *A = doble(Z); *B = complejo<C>(1.0, 0.0); }
+};
+
+// ---------------------------------------------------------------------------
 // BLA
 // ---------------------------------------------------------------------------
 // Una entrada saltea 2^k iteraciones empezando en la posición m de la órbita:
@@ -135,23 +189,21 @@ template<> HD CFE complejo_fe<CFE>(FE re, FE im) {
 
 template<class C, class R> struct Bla { C A; C B; R r; };
 
-// Nivel 0, un paso desde m:  dz' = 2 Z_m dz + dz^2 + dc  ~  A dz + B dc  con A = 2 Z_m, B = 1.
-// El término que se descarta (dz^2) es despreciable si |dz| < eps |A|.
+// Nivel 0, un paso desde m: los coeficientes los da la fórmula. Lo descartado es despreciable
+// si |dz| < eps |A|.
 //
 // Componer x (desde m) e y (desde m + l_x):
 //     A = A_y A_x,   B = A_y B_x + B_y,   r = min(r_x, (r_y - |B_x| |dc|max) / |A_x|)
-template<class C, class R>
+template<class F, class C, class R>
 int construir_bla(const C* Z, int largo_orbita, R dc_max, double eps,
                   Bla<C, R>* tabla, int* off, int* cnt)
 {
     int n0 = largo_orbita - 2;      // pasos m -> m+1 con m = 1 .. L-2
-    if (n0 <= 0 || eps <= 0.0) return 0;
+    if (!F::tiene_bla || n0 <= 0 || eps <= 0.0) return 0;
 
-    const C uno = complejo<C>(1.0, 0.0);
     for (int j = 0; j < n0; ++j) {
         Bla<C, R>& b = tabla[j];
-        b.A = doble(Z[j + 1]);
-        b.B = uno;
+        F::bla(Z[j + 1], &b.A, &b.B);
         b.r = real<R>(eps) * modulo(b.A);
     }
     off[0] = 0; cnt[0] = n0;
@@ -205,44 +257,93 @@ HD int buscar_bla(const Bla<C, R>* tabla, const int* off, const int* cnt, int ni
 // ---------------------------------------------------------------------------
 // Iteración de un píxel
 // ---------------------------------------------------------------------------
-// Devuelve la iteración de escape con la misma convención que el resto de los backends
-// (si z_{n+1} escapa, devuelve n; si no escapa, max_iter). En *pasos suma cuántos pasos
-// reales se hicieron (para medir cuánto ahorra el BLA).
-template<class C, class R>
-HD int iterar_pixel(const C* Z, int largo_orbita,
-                    const Bla<C, R>* tabla, const int* off, const int* cnt, int niveles,
-                    C dc, int max_iter, long long* pasos)
+
+// Qué calcular además de las iteraciones (bits de `salidas`)
+#define SALIDA_SUAVE    1   // iteración continua, para el coloreo suave
+#define SALIDA_DERIVADA 2   // distancia al borde y normal, para la iluminación
+
+// Iteraciones extra después del escape: |z| crece como |z|^(2^k) y el valor suave sale
+// tan preciso como con un radio de escape enorme, sin cambiar el conteo de iteraciones.
+#define ITERACIONES_EXTRA 4
+
+struct Pixel {
+    int n;           // iteración de escape (si z_{n+1} escapa, n; si no escapa, max_iter)
+    float suave;     // iteración continua (max_iter en el interior)
+    float distancia; // distancia estimada al borde, en píxeles (0 en el interior)
+    float nx, ny;    // normal unitaria del "relieve" (0 en el interior)
+};
+
+template<class F, class C, class R>
+HD Pixel iterar_pixel(const C* Z, int largo_orbita,
+                      const Bla<C, R>* tabla, const int* off, const int* cnt, int niveles,
+                      C dc, C k, int max_iter, int salidas, R paso_pixel, long long* pasos)
 {
+    const bool con_derivada = (salidas & SALIDA_DERIVADA) != 0;
     const R cuatro = real<R>(4.0);
-    C dz = complejo<C>(0.0, 0.0);
+    C dz = F::dz_inicial(dc);
+    C der = F::template der_inicial<C>();
+    C z = Z[0] + dz;
     int m = 0;   // posición en la órbita de referencia
     int n = 0;   // iteraciones del píxel
+    bool escapo = false;
     long long p = 0;
     while (n < max_iter) {
-        int k = buscar_bla(tabla, off, cnt, niveles, m, cota(dz), max_iter - n);
-        if (k >= 0) {
-            const Bla<C, R>& b = tabla[off[k] + ((m - 1) >> k)];
+        int nivel = F::tiene_bla ? buscar_bla(tabla, off, cnt, niveles, m, cota(dz), max_iter - n) : -1;
+        if (nivel >= 0) {
+            const Bla<C, R>& b = tabla[off[nivel] + ((m - 1) >> nivel)];
+            if (con_derivada) der = b.A * der + b.B;
             dz = b.A * dz + b.B * dc;
-            m += 1 << k;
-            n += 1 << k;
+            m += 1 << nivel;
+            n += 1 << nivel;
         } else {
-            // dz = (2 Z_m + dz) dz + dc
-            dz = (doble(Z[m]) + dz) * dz + dc;
+            if (con_derivada) der = F::derivada(z, der);
+            dz = F::paso(Z[m], dz, dc);
             ++m;
             ++n;
         }
         ++p;
 
-        C z = Z[m] + dz;
+        z = Z[m] + dz;
         R z2 = norma2(z);
-        if (menor_pos(cuatro, z2)) { *pasos += p; return n - 1; }
+        if (menor_pos(cuatro, z2)) { escapo = true; break; }
 
-        // Rebasing
-        if (menor_pos(z2, norma2(dz)) || m == largo_orbita - 1) {
-            dz = z;
+        // Rebasing: si la diferencia respecto del inicio de la órbita es más chica que la actual,
+        // se sigue desde ahí (en Mandelbrot Z_0 = 0, así que es |z| < |dz|)
+        C dz_nuevo = z - Z[0];
+        if (menor_pos(norma2(dz_nuevo), norma2(dz)) || m == largo_orbita - 1) {
+            dz = dz_nuevo;
             m = 0;
         }
     }
     *pasos += p;
-    return max_iter;
+
+    Pixel px;
+    px.suave = 0.0f; px.distancia = 0.0f; px.nx = 0.0f; px.ny = 0.0f;
+    if (!escapo) {
+        px.n = max_iter;
+        px.suave = (float)max_iter;
+        return px;
+    }
+    px.n = n - 1;
+    if (salidas & (SALIDA_SUAVE | SALIDA_DERIVADA)) {
+        C c = F::c_completo(k, dc);
+        for (int i = 0; i < ITERACIONES_EXTRA; ++i) {
+            if (con_derivada) der = F::derivada(z, der);
+            z = F::paso_completo(z, c);
+        }
+        double ln_z = 0.5 * log(a_double(norma2(z)));      // ln|z|
+        if (salidas & SALIDA_SUAVE) {
+            // mu = n + extra - log2(ln|z|): continua entre bandas
+            double mu = (double)(n + ITERACIONES_EXTRA) - log2(ln_z);
+            px.suave = (float)(mu > 0.0 ? mu : 0.0);
+        }
+        if (con_derivada) {
+            // Estimador de distancia: d = |z| ln|z| / |dz/dc|, pasado a píxeles
+            R d = real<R>(sqrt(a_double(norma2(z))) * ln_z) / (modulo(der) * paso_pixel);
+            px.distancia = (float)a_double(d);
+            // Normal del relieve: dirección de z / der (= z * conj(der) / |der|^2)
+            direccion(z * conjugado(der), &px.nx, &px.ny);
+        }
+    }
+    return px;
 }

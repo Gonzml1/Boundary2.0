@@ -199,45 +199,70 @@ _RUTA_HEADER_PERTURBACION = os.path.join(
     os.path.dirname(__file__), os.pardir, 'codigos_cpp', 'perturbacion_core.h'
 )
 _KERNELS_PERTURBACION = r"""
-template<class C, class R>
+template<class F, class C, class R>
 __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabla,
                                     const int* off, const int* cnt, int niveles,
                                     double bx_m, int bx_e, double by_m, int by_e,
                                     double sx_m, int sx_e, double sy_m, int sy_e,
-                                    int width, int height, int max_iter,
-                                    int* output, unsigned long long* pasos) {
+                                    double paso_m, int paso_e, double k_re, double k_im,
+                                    int width, int height, int max_iter, int salidas,
+                                    int* iter, float* suave, float* distancia, float* nx, float* ny,
+                                    unsigned long long* pasos) {
     int x = blockIdx.x * blockDim.x + threadIdx.x;
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
     FE dc_re = fe_normalizar(bx_m, bx_e) + fe_normalizar(sx_m, sx_e) * fe((double)x);
     FE dc_im = fe_normalizar(by_m, by_e) + fe_normalizar(sy_m, sy_e) * fe((double)y);
+    FE paso_fe = fe_normalizar(paso_m, paso_e);
     long long p = 0;
-    output[y * width + x] = iterar_pixel<C, R>(Z, largo, tabla, off, cnt, niveles,
-                                                complejo_fe<C>(dc_re, dc_im), max_iter, &p);
+    Pixel px = iterar_pixel<F, C, R>(Z, largo, tabla, off, cnt, niveles,
+                                     complejo_fe<C>(dc_re, dc_im), complejo<C>(k_re, k_im),
+                                     max_iter, salidas, convertir_paso<R>(paso_fe), &p);
+    int idx = y * width + x;
+    iter[idx] = px.n;
+    if (salidas & SALIDA_SUAVE) suave[idx] = px.suave;
+    if (salidas & SALIDA_DERIVADA) { distancia[idx] = px.distancia; nx[idx] = px.nx; ny[idx] = px.ny; }
     atomicAdd(pasos, (unsigned long long)p);
 }
 
 #define ARGS(C, R) const C* Z, int largo, const Bla<C, R>* tabla, const int* off, const int* cnt, \
     int niveles, double bx_m, int bx_e, double by_m, int by_e, double sx_m, int sx_e, \
-    double sy_m, int sy_e, int width, int height, int max_iter, int* output, unsigned long long* pasos
+    double sy_m, int sy_e, double paso_m, int paso_e, double k_re, double k_im, \
+    int width, int height, int max_iter, int salidas, \
+    int* iter, float* suave, float* distancia, float* nx, float* ny, unsigned long long* pasos
 #define PASAR Z, largo, tabla, off, cnt, niveles, bx_m, bx_e, by_m, by_e, sx_m, sx_e, sy_m, sy_e, \
-    width, height, max_iter, output, pasos
+    paso_m, paso_e, k_re, k_im, width, height, max_iter, salidas, iter, suave, distancia, nx, ny, pasos
 
-extern "C" __global__ void perturbacion_double(ARGS(CD, double))  { render_perturbacion<CD, double>(PASAR); }
-extern "C" __global__ void perturbacion_floatexp(ARGS(CFE, FE))   { render_perturbacion<CFE, FE>(PASAR); }
+// Un par de kernels (double / floatexp) por fórmula
+#define KERNELS_FORMULA(F, nombre) \
+    extern "C" __global__ void perturbacion_##nombre##_double(ARGS(CD, double)) \
+        { render_perturbacion<F, CD, double>(PASAR); } \
+    extern "C" __global__ void perturbacion_##nombre##_floatexp(ARGS(CFE, FE)) \
+        { render_perturbacion<F, CFE, FE>(PASAR); }
+
+// FORMULAS
+KERNELS_FORMULA(Mandelbrot, mandelbrot)
 """
 
 _modulo_perturbacion = None
 
-def kernel_perturbacion(modo: int):
-    """Devuelve el kernel para el modo (0 = double, 1 = floatexp). Se compila la primera vez."""
+def kernel_perturbacion(formula: str, modo: int):
+    """Kernel de la fórmula para el modo (0 = double, 1 = floatexp). Se compila la primera vez."""
     global _modulo_perturbacion
     if _modulo_perturbacion is None:
         with open(_RUTA_HEADER_PERTURBACION, encoding='utf-8') as f:
             header = f.read()
-        _modulo_perturbacion = cp.RawModule(code=header + _KERNELS_PERTURBACION)
-    nombre = 'perturbacion_double' if modo == 0 else 'perturbacion_floatexp'
-    return _modulo_perturbacion.get_function(nombre)
+        _modulo_perturbacion = cp.RawModule(code=header + _AYUDAS_GPU + _KERNELS_PERTURBACION)
+    return _modulo_perturbacion.get_function(
+        f"perturbacion_{formula}_{'double' if modo == 0 else 'floatexp'}"
+    )
+
+# El paso entre píxeles llega como floatexp; en modo double se convierte
+_AYUDAS_GPU = r"""
+template<class R> __device__ R convertir_paso(FE p);
+template<> __device__ double convertir_paso<double>(FE p) { return a_double(p); }
+template<> __device__ FE convertir_paso<FE>(FE p) { return p; }
+"""
 
 mandelbrot_espiral_kernel = cp.ElementwiseKernel(
     in_params='complex128 c, int32 max_iter',
