@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
-from PyQt5.QtWidgets import QMainWindow, QFileDialog, QInputDialog, QProgressDialog, QMessageBox
+from PyQt5.QtWidgets import QMainWindow, QFileDialog, QInputDialog, QMessageBox
 
 import gui.tema_oscuro as ts
 from gui.MandelbrotGUI import Ui_Boundary
@@ -15,7 +15,7 @@ from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY, calculos_mandelbr
 from core.modulo_opengl import MandelbrotWidget, VISTA_INICIAL
 from core.paletas import PALETTE_REGISTRY
 from core.render import renderizar, PedidoRender, OpcionesColor
-from core.video import planificar_zoom, armar_mp4
+from core.video import planificar_zoom, armar_mp4, crear_carpeta_video
 from core import favoritos
 
 log = logging.getLogger(__name__)
@@ -26,6 +26,57 @@ RESOLUCIONES = {"Actual": None, "Full HD (1920x1080)": (1920, 1080), "4K (3840x2
 def _guardar_png(ruta: str, rgb: np.ndarray) -> None:
     # La fila 0 de la imagen es ymin: se invierte para que no salga al revés
     plt.imsave(ruta, rgb[::-1])
+
+
+class DialogoProgresoVideo(QtWidgets.QDialog):
+    """Progreso del video: mensaje, barra y, abajo, cuántas imágenes van y el botón Cancelar."""
+    cancelado = pyqtSignal()
+
+    def __init__(self, texto: str, total: int, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Renderizando video")
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self._terminado = False
+
+        mensaje = QtWidgets.QLabel(texto)
+        mensaje.setAlignment(Qt.AlignCenter)
+        self.barra = QtWidgets.QProgressBar()
+        self.barra.setMinimumWidth(320)
+        self.contador = QtWidgets.QLabel()
+        self.boton_cancelar = QtWidgets.QPushButton("Cancelar")
+        self.boton_cancelar.clicked.connect(self._cancelar)
+
+        abajo = QtWidgets.QHBoxLayout()
+        abajo.addWidget(self.contador)
+        abajo.addStretch()
+        abajo.addWidget(self.boton_cancelar)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.addWidget(mensaje)
+        layout.addWidget(self.barra)
+        layout.addLayout(abajo)
+        self.actualizar(0, total)
+
+    def actualizar(self, actual: int, total: int) -> None:
+        self.barra.setMaximum(total)
+        self.barra.setValue(actual)
+        self.contador.setText(f"{actual}/{total} imágenes")
+
+    def _cancelar(self) -> None:
+        # El hilo termina el cuadro en curso y después avisa; recién ahí se cierra el diálogo
+        self.boton_cancelar.setEnabled(False)
+        self.contador.setText("Cancelando…")
+        self.cancelado.emit()
+
+    def reject(self):
+        # Esc o la X de la ventana cancelan el video, igual que el botón
+        if self._terminado:
+            super().reject()
+        else:
+            self._cancelar()
+
+    def terminar(self) -> None:
+        self._terminado = True
+        self.accept()
 
 
 # --- HILO EN SEGUNDO PLANO PARA EL VIDEO ---
@@ -365,7 +416,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Imagen guardada: {ruta}", 10000)
 
     def video_dialogo(self):
-        carpeta = QFileDialog.getExistingDirectory(self, "Seleccionar carpeta para el video")
+        carpeta = QFileDialog.getExistingDirectory(
+            self, "Seleccionar dónde guardar el video (se crea una subcarpeta nueva)")
         if not carpeta: return
 
         resolucion = self._elegir_resolucion("Video")
@@ -379,23 +431,28 @@ class MainWindow(QMainWindow):
 
         self.sincronizar_hacia_motor()
         cuadros = max(1, round(fps * duracion))
+        # Cada video en su propia subcarpeta, para no mezclar cuadros con videos anteriores
+        try:
+            carpeta = crear_carpeta_video(carpeta)
+        except OSError as e:
+            QMessageBox.critical(self, "Video", f"No se pudo crear la carpeta del video:\n{e}")
+            return
+        self.statusBar().showMessage(f"Guardando el video en {carpeta}", 10000)
         render_w, render_h = resolucion
 
-        self.progreso_ui = QProgressDialog(
+        self.progreso_ui = DialogoProgresoVideo(
             f"Zoom desde el fractal entero hasta la vista actual\n{cuadros} cuadros de {render_w}x{render_h}",
-            "Cancelar", 0, cuadros, self)
-        self.progreso_ui.setWindowTitle("Renderizando video")
-        self.progreso_ui.setMinimumDuration(0)
+            cuadros, self)
         self.progreso_ui.show()
 
         self.worker = WorkerVideo(self.mandelbrot.pedido_actual(render_w, render_h), carpeta, fps, duracion)
-        self.worker.progreso.connect(self.progreso_ui.setValue)
+        self.worker.progreso.connect(self.progreso_ui.actualizar)
         self.worker.terminado.connect(self._video_terminado)
-        self.progreso_ui.canceled.connect(self.worker.requestInterruption)
+        self.progreso_ui.cancelado.connect(self.worker.requestInterruption)
         self.worker.start()
 
     def _video_terminado(self, mensaje):
-        self.progreso_ui.close()
+        self.progreso_ui.terminar()
         log.info(mensaje)
         self.statusBar().showMessage(mensaje, 15000)
 

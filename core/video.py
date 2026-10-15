@@ -3,6 +3,7 @@ import os
 import logging
 import shutil
 import subprocess
+from datetime import datetime
 from decimal import Decimal
 from typing import Iterator, NamedTuple
 
@@ -59,6 +60,22 @@ def planificar_zoom(xmin: Decimal, xmax: Decimal, ymin: Decimal, ymax: Decimal,
         profundidad = float(t)
         iters = round(iter_0 * (max_iter / iter_0) ** profundidad)
         yield Cuadro(cx - medio_ancho, cx + medio_ancho, cy - medio_alto, cy + medio_alto, iters)
+
+
+def crear_carpeta_video(base: str) -> str:
+    """Crea una subcarpeta nueva para un video dentro de `base` (zoom_AAAA-MM-DD_HH-MM-SS).
+
+    Cada video va en su propia carpeta para que sus cuadros nunca se mezclen con los de
+    otro video (el explorador los intercala al ordenar y parece que la numeración salta).
+    """
+    nombre = datetime.now().strftime("zoom_%Y-%m-%d_%H-%M-%S")
+    carpeta = os.path.join(base, nombre)
+    sufijo = 2
+    while os.path.exists(carpeta):              # dos videos en el mismo segundo
+        carpeta = os.path.join(base, f"{nombre}_{sufijo}")
+        sufijo += 1
+    os.makedirs(carpeta)
+    return carpeta
 
 
 def armar_mp4(carpeta: str, fps: int, nombre: str = "zoom.mp4") -> str | None:
