@@ -501,10 +501,12 @@ class MainWindow(QMainWindow):
         if dialogo.exec() != QtWidgets.QDialog.Accepted:
             return
 
-        if dialogo.accion == "continuar":
+        rehacer = None
+        if dialogo.accion in ("continuar", "rehacer"):
             carpeta = dialogo.carpeta_continuar
             datos, config = cargar_plan(carpeta)
             pedido = pedido_desde_plan(datos, config)
+            rehacer = dialogo.cuadros_rehacer
         else:
             config = dialogo.config()
             base = QFileDialog.getExistingDirectory(
@@ -522,13 +524,16 @@ class MainWindow(QMainWindow):
             pedido = self.mandelbrot.pedido_actual(config.ancho, config.alto)
 
         self.statusBar().showMessage(f"Guardando el video en {carpeta}", 10000)
-        texto = (f"Zoom desde el fractal entero hasta la vista elegida\n"
-                 f"{config.cuadros} cuadros de {config.ancho}x{config.alto} "
-                 f"({formatear_duracion(config.cuadros / config.fps)} de video)")
-        self.progreso_ui = DialogoProgresoVideo(texto, config.cuadros, self)
+        if rehacer is None:
+            texto = (f"Zoom desde el fractal entero hasta la vista elegida\n"
+                     f"{config.cuadros} cuadros de {config.ancho}x{config.alto} "
+                     f"({formatear_duracion(config.cuadros / config.fps)} de video)")
+        else:
+            texto = f"Rehaciendo {len(rehacer)} cuadros de {config.ancho}x{config.alto}"
+        self.progreso_ui = DialogoProgresoVideo(texto, config.cuadros if rehacer is None else len(rehacer), self)
         self.progreso_ui.show()
 
-        self.worker = WorkerVideo(pedido, carpeta, config)
+        self.worker = WorkerVideo(pedido, carpeta, config, rehacer)
         self.worker.empezo.connect(self.progreso_ui.empezar)
         self.worker.progreso.connect(self.progreso_ui.actualizar)
         self.worker.terminado.connect(self._video_terminado)

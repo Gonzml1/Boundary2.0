@@ -148,7 +148,44 @@ def cargar_plan(carpeta: str) -> tuple[dict, ConfigVideo] | None:
 
 def cuadros_hechos(carpeta: str, config: ConfigVideo) -> int:
     """Cuántos cuadros del video ya están guardados."""
-    return sum(os.path.exists(os.path.join(carpeta, nombre_cuadro(i))) for i in range(config.cuadros))
+    return config.cuadros - len(cuadros_faltantes(carpeta, config))
+
+
+def cuadros_faltantes(carpeta: str, config: ConfigVideo) -> list[int]:
+    """Índices (desde 0) de los cuadros que no están en la carpeta."""
+    return [i for i in range(config.cuadros) if not os.path.exists(os.path.join(carpeta, nombre_cuadro(i)))]
+
+
+def describir_cuadros(indices: list[int]) -> str:
+    """Índices desde 0 -> texto con los números de cuadro (desde 1) agrupados: "17, 230-235"."""
+    partes = []
+    for i in sorted(set(indices)):
+        if partes and i == partes[-1][1] + 1:
+            partes[-1][1] = i
+        else:
+            partes.append([i, i])
+    return ", ".join(f"{a + 1}" if a == b else f"{a + 1}-{b + 1}" for a, b in partes)
+
+
+def leer_cuadros(texto: str, total: int) -> list[int]:
+    """Texto como "17, 230-235" (números de cuadro desde 1) -> índices desde 0, ordenados.
+    Lanza ValueError con un mensaje claro si algo no se entiende o se sale del video."""
+    indices = set()
+    for parte in texto.replace(";", ",").split(","):
+        parte = parte.strip()
+        if not parte:
+            continue
+        desde, _, hasta = parte.partition("-")
+        try:
+            a, b = int(desde), int(hasta) if hasta else int(desde)
+        except ValueError:
+            raise ValueError(f"No entiendo '{parte}': usá números y rangos, como 17, 230-235")
+        if a > b:
+            a, b = b, a
+        if a < 1 or b > total:
+            raise ValueError(f"'{parte}' se sale del video: los cuadros van de 1 a {total}")
+        indices.update(range(a - 1, b))
+    return sorted(indices)
 
 
 def armar_mp4(carpeta: str, fps: int, nombre: str = "zoom.mp4") -> str | None:

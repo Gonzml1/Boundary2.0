@@ -43,7 +43,7 @@ y el log dice qué se omitió.
 |---|---|
 | Rueda del mouse | Zoom hacia el cursor (el punto bajo el mouse queda quieto) |
 | Clic izquierdo / derecho | Acercar / alejar en ese punto |
-| Arrastrar con el botón izquierdo | Zoom al rectángulo marcado |
+| Mantener el botón izquierdo (¼ s) y arrastrar | Zoom al rectángulo marcado. Si soltás antes, es el zoom por clic de siempre |
 | Arrastrar con el del medio, flechas, WASD | Mover |
 | `+` / `-` | Acercar / alejar al centro |
 | `Backspace`, `Alt+Izquierda`, botón "atrás" del mouse | Vista anterior |
@@ -95,7 +95,12 @@ la vista actual.
 - Cada video se guarda en una carpeta nueva (`zoom_AAAA-MM-DD_HH-MM-SS`) con `frame_1.png`,
   `frame_2.png`, ... y, si está instalado ffmpeg, el `zoom.mp4`. El progreso muestra cuánto falta.
 - **Continuar video…**: si se cancela (o se corta la luz), se puede retomar eligiendo su carpeta. Los
-  cuadros que ya están no se recalculan: la carpeta guarda todos los parámetros en `video.json`.
+  cuadros que ya están no se recalculan: la carpeta guarda todos los parámetros en `video.json`. Si al
+  cancelar quedó algún hueco (con CPU y GPU calculando a la vez, el cuadro que tenía la CPU puede quedar
+  sin terminar), se rellena primero.
+- **Rehacer cuadros…**: vuelve a calcular cuadros puntuales de un video, por ejemplo uno que se borró
+  o que querés regenerar. Muestra cuáles faltan y acepta números y rangos (`17, 230-235`). Los cuadros
+  salen idénticos a los originales y el `.mp4` se vuelve a armar si están todos.
 - **Calcular también con la CPU** (activado por defecto): si el método es `perturbacion_gpu`, la CPU
   calcula cuadros al mismo tiempo con `perturbacion_cpu`. Las dos dan exactamente la misma imagen (ver
   más abajo), así que mezclar cuadros no se nota. Los PNG se comprimen en otros hilos mientras se

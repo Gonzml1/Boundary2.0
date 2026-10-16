@@ -17,7 +17,7 @@ from core.modulo_de_calculo_fractales import RenderCancelado, FRACTAL_REGISTRY, 
 from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, PedidoRender, OpcionesColor, guardar_imagen
 from core.video import (ConfigVideo, planificar_zoom, armar_mp4, nombre_cuadro, guardar_plan,
-                        cargar_plan, cuadros_hechos)
+                        cargar_plan, cuadros_hechos, cuadros_faltantes, describir_cuadros, leer_cuadros)
 
 log = logging.getLogger(__name__)
 
@@ -74,16 +74,19 @@ class WorkerVideo(QThread):
 
     - Si el método es de GPU y tiene versión de CPU, las dos calculan cuadros a la vez.
     - Los PNG se comprimen y guardan en otros hilos mientras se calculan los cuadros siguientes.
-    - Si en la carpeta ya hay cuadros hechos (un video cancelado), los saltea."""
+    - Si en la carpeta ya hay cuadros hechos (un video cancelado), los saltea.
+    - Con `rehacer` (índices desde 0) calcula solo esos cuadros, aunque ya existan."""
     empezo = pyqtSignal(int, int)    # cuadros ya hechos, total
     progreso = pyqtSignal(int, int)  # cuadros hechos, total
     terminado = pyqtSignal(str)      # mensaje final
 
-    def __init__(self, pedido: PedidoRender, carpeta: str, config: ConfigVideo):
+    def __init__(self, pedido: PedidoRender, carpeta: str, config: ConfigVideo,
+                 rehacer: list[int] | None = None):
         super().__init__()
         self.pedido = pedido
         self.carpeta = carpeta
         self.config = config
+        self.rehacer = rehacer
         self.metodos = metodos_para_video(pedido, config.usar_cpu)
         self._renderizadores = [Renderizador(tam_cache=0) for _ in self.metodos]
         self._candado = threading.Lock()
@@ -104,16 +107,26 @@ class WorkerVideo(QThread):
 
     def run(self):
         p, cfg = self.pedido, self.config
-        total = cfg.cuadros
         guardar_plan(self.carpeta, p, cfg, PALETTE_REGISTRY[p.paleta][0])
-        self._hechos = cuadros_hechos(self.carpeta, cfg)
+        plan = list(planificar_zoom(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto,
+                                    cfg.cuadros_zoom, p.max_iter, cfg.suavizado))
+        if self.rehacer is None:
+            # Todo el video, salteando los cuadros que ya están (y rellenando los huecos)
+            total = cfg.cuadros
+            self._hechos = cuadros_hechos(self.carpeta, cfg)
+            a_calcular = [i for i in range(cfg.cuadros_zoom)
+                          if not os.path.exists(os.path.join(self.carpeta, nombre_cuadro(i)))]
+            pausa = [i for i in range(cfg.cuadros_zoom, cfg.cuadros)
+                     if not os.path.exists(os.path.join(self.carpeta, nombre_cuadro(i)))]
+        else:
+            # Solo los cuadros pedidos, aunque ya existan
+            total = len(self.rehacer)
+            self._hechos = 0
+            a_calcular = [i for i in self.rehacer if i < cfg.cuadros_zoom]
+            pausa = [i for i in self.rehacer if i >= cfg.cuadros_zoom]
         self.empezo.emit(self._hechos, total)
         log.info("Video con %s", " + ".join(self.metodos))
-
-        plan = planificar_zoom(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto,
-                               cfg.cuadros_zoom, p.max_iter, cfg.suavizado)
-        pendientes = iter([(i, c) for i, c in enumerate(plan)
-                           if not os.path.exists(os.path.join(self.carpeta, nombre_cuadro(i)))])
+        pendientes = iter([(i, plan[i]) for i in a_calcular])
         espacio = threading.Semaphore(MAX_CUADROS_EN_ESPERA)
 
         def guardar(ruta, rgb):
@@ -165,14 +178,20 @@ class WorkerVideo(QThread):
                 f"Continuar video… y elegí la carpeta {self.carpeta}")
             return
 
-        # Pausa final: copias del último cuadro (no hace falta volver a calcularlo)
+        # Pausa final: copias del último cuadro del zoom (no hace falta volver a calcularlo)
         ultimo = os.path.join(self.carpeta, nombre_cuadro(cfg.cuadros_zoom - 1))
-        for i in range(cfg.cuadros_zoom, total):
-            ruta = os.path.join(self.carpeta, nombre_cuadro(i))
-            if not os.path.exists(ruta):
-                shutil.copyfile(ultimo, ruta)
+        if pausa and os.path.exists(ultimo):
+            for i in pausa:
+                shutil.copyfile(ultimo, os.path.join(self.carpeta, nombre_cuadro(i)))
                 self._contar_hecho(total)
 
+        # El mp4 se arma solo si están todos los cuadros (ffmpeg corta en el primer hueco)
+        faltan = cuadros_faltantes(self.carpeta, cfg)
+        if faltan:
+            cuantos = "falta 1 cuadro" if len(faltan) == 1 else f"faltan {len(faltan)} cuadros"
+            self.terminado.emit(f"Listo, pero {cuantos} ({describir_cuadros(faltan)}): "
+                                f"completalos con Continuar video… o Rehacer cuadros…")
+            return
         mp4 = armar_mp4(self.carpeta, cfg.fps)
         self.terminado.emit(f"Video listo: {mp4}" if mp4 else f"Cuadros listos en {self.carpeta}")
 
@@ -279,6 +298,7 @@ class DialogoVideo(QtWidgets.QDialog):
         self.crear_pedido = crear_pedido      # (ancho, alto) -> PedidoRender de la vista actual
         self.accion = None
         self.carpeta_continuar = None
+        self.cuadros_rehacer = None
         self.resoluciones = {f"Actual ({tamano_actual[0]}x{tamano_actual[1]})": tamano_actual, **RESOLUCIONES}
 
         self.resolucion = QtWidgets.QComboBox()
@@ -313,6 +333,9 @@ class DialogoVideo(QtWidgets.QDialog):
 
         boton_previa = QtWidgets.QPushButton("Vista previa")
         boton_continuar = QtWidgets.QPushButton("Continuar video…")
+        boton_rehacer = QtWidgets.QPushButton("Rehacer cuadros…")
+        boton_rehacer.setToolTip("Volver a calcular cuadros puntuales de un video ya hecho (por ejemplo, uno que se borró)")
+        boton_rehacer.clicked.connect(self._rehacer)
         boton_renderizar = QtWidgets.QPushButton("Renderizar…")
         boton_cancelar = QtWidgets.QPushButton("Cancelar")
         boton_previa.clicked.connect(self._vista_previa)
@@ -320,7 +343,7 @@ class DialogoVideo(QtWidgets.QDialog):
         boton_renderizar.clicked.connect(self._renderizar)
         boton_cancelar.clicked.connect(self.reject)
         botones = QtWidgets.QHBoxLayout()
-        for b in (boton_previa, boton_continuar):
+        for b in (boton_previa, boton_continuar, boton_rehacer):
             botones.addWidget(b)
         botones.addStretch()
         for b in (boton_renderizar, boton_cancelar):
@@ -372,26 +395,62 @@ class DialogoVideo(QtWidgets.QDialog):
         self.accion = "renderizar"
         self.accept()
 
-    def _continuar(self):
+    def _elegir_video(self, titulo: str):
+        """Pide la carpeta de un video y devuelve (carpeta, config), o None."""
         carpeta = QtWidgets.QFileDialog.getExistingDirectory(
-            self, "Elegí la carpeta del video sin terminar (zoom_...)",
-            self.ajustes.value("carpetas/videos", ""))
+            self, f"{titulo}: elegí la carpeta del video (zoom_...)", self.ajustes.value("carpetas/videos", ""))
         if not carpeta:
-            return
+            return None
         plan = cargar_plan(carpeta)
         if plan is None:
-            QtWidgets.QMessageBox.warning(self, "Continuar video",
-                                          "Esa carpeta no tiene un video para continuar (falta video.json).")
+            QtWidgets.QMessageBox.warning(self, titulo, "Esa carpeta no tiene un video (falta video.json).")
+            return None
+        return carpeta, plan[1]
+
+    def _continuar(self):
+        elegido = self._elegir_video("Continuar video")
+        if elegido is None:
             return
-        _, config = plan
-        hechos = cuadros_hechos(carpeta, config)
+        carpeta, config = elegido
+        faltan = cuadros_faltantes(carpeta, config)
+        if not faltan:
+            QtWidgets.QMessageBox.information(self, "Continuar video", "Ese video ya tiene todos sus cuadros.")
+            return
         if QtWidgets.QMessageBox.question(
                 self, "Continuar video",
-                f"Video de {config.ancho}x{config.alto}: hay {hechos}/{config.cuadros} cuadros hechos.\n"
-                f"¿Seguir desde ahí?") != QtWidgets.QMessageBox.Yes:
+                f"Video de {config.ancho}x{config.alto}: hay {config.cuadros - len(faltan)}/{config.cuadros} "
+                f"cuadros hechos.\nFaltan: {describir_cuadros(faltan)}\n\n¿Calcular los que faltan?"
+        ) != QtWidgets.QMessageBox.Yes:
             return
         self.carpeta_continuar = carpeta
         self.accion = "continuar"
+        self.accept()
+
+    def _rehacer(self):
+        elegido = self._elegir_video("Rehacer cuadros")
+        if elegido is None:
+            return
+        carpeta, config = elegido
+        faltan = cuadros_faltantes(carpeta, config)
+        texto_faltan = describir_cuadros(faltan) if faltan else "ninguno"
+        while True:
+            texto, ok = QtWidgets.QInputDialog.getText(
+                self, "Rehacer cuadros",
+                f"Video de {config.ancho}x{config.alto} con {config.cuadros} cuadros.\n"
+                f"Faltan: {texto_faltan}\n\nCuadros a rehacer (por ejemplo: 17, 230-235):",
+                text=describir_cuadros(faltan))
+            if not ok:
+                return
+            try:
+                cuadros = leer_cuadros(texto, config.cuadros)
+            except ValueError as e:
+                QtWidgets.QMessageBox.warning(self, "Rehacer cuadros", str(e))
+                continue
+            if cuadros:
+                break
+        self.carpeta_continuar = carpeta
+        self.cuadros_rehacer = cuadros
+        self.accion = "rehacer"
         self.accept()
 
 
@@ -468,7 +527,7 @@ class DialogoProgresoVideo(QtWidgets.QDialog):
 ATAJOS = [
     ("Rueda del mouse", "Zoom hacia el cursor"),
     ("Clic izquierdo / derecho", "Acercar / alejar en ese punto"),
-    ("Arrastrar con el izquierdo", "Zoom al rectángulo marcado"),
+    ("Mantener y arrastrar con el izquierdo", "Zoom al rectángulo marcado"),
     ("Arrastrar con el del medio", "Mover la vista"),
     ("Flechas, WASD", "Mover la vista"),
     ("+  /  −", "Acercar / alejar al centro"),

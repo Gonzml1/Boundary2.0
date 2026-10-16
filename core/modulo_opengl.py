@@ -1,3 +1,4 @@
+import time
 import logging
 import threading
 from dataclasses import replace
@@ -30,7 +31,10 @@ PARAMETROS_SIN_RENDER = {"zoom_in", "zoom_out"}
 # Historial de vistas: una vista entra al historial cuando queda quieta este tiempo
 MS_HISTORIAL = 600
 MAX_HISTORIAL = 200
-# Arrastre mínimo (en píxeles) para que un clic izquierdo sea zoom por rectángulo
+# Para que un clic izquierdo sea zoom por rectángulo hay que mantenerlo apretado este tiempo y
+# arrastrar al menos esta distancia; si no, es el zoom por clic de siempre (aunque el mouse se
+# haya movido un poco al hacer clic)
+ESPERA_RECTANGULO = 0.25
 ARRASTRE_MINIMO = 6
 
 
@@ -133,6 +137,7 @@ class MandelbrotWidget(QOpenGLWidget):
         self.last_pos = None
         # Zoom por rectángulo con el botón izquierdo
         self._inicio_izq = None
+        self._momento_izq = 0.0
         self._rectangulo = QRubberBand(QRubberBand.Rectangle, self)
 
         # Historial de vistas (atrás / adelante)
@@ -443,6 +448,7 @@ class MandelbrotWidget(QOpenGLWidget):
         if event.button() == Qt.LeftButton:
             # Si se arrastra es zoom por rectángulo; si no, al soltar es el zoom de siempre
             self._inicio_izq = event.pos()
+            self._momento_izq = time.monotonic()
         elif event.button() == Qt.RightButton:
             self._centrar_y_zoom(event.x(), self.height() - event.y(), self.zoom_out)
         elif event.button() == Qt.MiddleButton:
@@ -470,7 +476,8 @@ class MandelbrotWidget(QOpenGLWidget):
         self.coordenadas_raton_cambiadas.emit(*self.coordenadas_como_texto(real, imag))
 
         if self._inicio_izq is not None and event.buttons() & Qt.LeftButton:
-            if (event.pos() - self._inicio_izq).manhattanLength() >= ARRASTRE_MINIMO:
+            mantenido = time.monotonic() - self._momento_izq >= ESPERA_RECTANGULO
+            if mantenido and (event.pos() - self._inicio_izq).manhattanLength() >= ARRASTRE_MINIMO:
                 self._rectangulo.setGeometry(QRect(self._inicio_izq, event.pos()).normalized())
                 self._rectangulo.show()
 
