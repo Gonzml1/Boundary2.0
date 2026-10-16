@@ -13,8 +13,13 @@ from decimal import Decimal
 import numpy as np
 from PIL import Image
 
-from .modulo_de_calculo_fractales import calculos_mandelbrot, Resultado, liberar_memoria_gpu, es_falta_de_memoria
-from .paletas import PALETTE_REGISTRY
+from .modulo_de_calculo_fractales import (calculos_mandelbrot, Resultado, liberar_memoria_gpu, es_falta_de_memoria,
+                                         BACKENDS_DISPONIBLES)
+from .paletas import PALETTE_REGISTRY, modulo_de
+
+# Colorear (paleta, luz y antialiasing) en la GPU si hay una: los colores son los mismos que en
+# numpy (mismas tablas y mismas cuentas) y es mucho más rápido. ABOUNDARY_COLOREO_CPU=1 lo apaga.
+COLOREAR_EN_GPU = BACKENDS_DISPONIBLES.get("gpu", False) and os.environ.get("ABOUNDARY_COLOREO_CPU") != "1"
 
 log = logging.getLogger(__name__)
 
@@ -106,7 +111,8 @@ class Renderizador:
                 resultado = _calcular(self.motor, pedido, factor)
             recalculado = True
             if self.tam_cache:
-                self._cache[clave] = (op.suave, op.iluminacion, resultado)
+                # El caché guarda una copia en la RAM: ocho imágenes grandes no entran en la GPU
+                self._cache[clave] = (op.suave, op.iluminacion, resultado.en_cpu())
                 while len(self._cache) > self.tam_cache:
                     self._cache.popitem(last=False)
 
@@ -130,6 +136,7 @@ def _calcular(motor: calculos_mandelbrot, pedido: PedidoRender, factor: int) -> 
     )
     motor.pedir_suave = pedido.opciones.suave
     motor.pedir_derivada = pedido.opciones.iluminacion
+    motor.dejar_en_gpu = COLOREAR_EN_GPU
     return motor.calcular_fractal()
 
 
@@ -139,8 +146,14 @@ def _componer(resultado: Resultado, pedido: PedidoRender, factor: int) -> tuple[
         # Promedio de cada bloque factor x factor (el color se promedia después de colorear)
         rgb = rgb.reshape(pedido.alto, factor, pedido.ancho, factor, 3).mean(axis=(1, 3))
         aplicadas = aplicadas | {"antialiasing"}
-    rgb = np.ascontiguousarray(np.clip(rgb, 0, 255).astype(np.uint8))
-    return rgb, frozenset(aplicadas)
+    return a_numpy_uint8(rgb), frozenset(aplicadas)
+
+
+def a_numpy_uint8(rgb) -> np.ndarray:
+    """Recorta a 0..255 y pasa a uint8 donde estén los datos; recién ahí se copia a la RAM."""
+    xp = modulo_de(rgb)
+    rgb = xp.ascontiguousarray(xp.clip(rgb, 0, 255).astype(xp.uint8))
+    return rgb.get() if xp is not np else rgb
 
 
 def colorear(resultado: Resultado, pedido: PedidoRender) -> tuple[np.ndarray, set]:
@@ -149,37 +162,42 @@ def colorear(resultado: Resultado, pedido: PedidoRender) -> tuple[np.ndarray, se
     aplicadas = set()
     max_iter_color = pedido.max_iter_color or pedido.max_iter
 
-    iteraciones = np.asarray(resultado.iteraciones)
+    if COLOREAR_EN_GPU:
+        resultado = resultado.en_gpu()
+    iteraciones = resultado.iteraciones
+    if modulo_de(iteraciones) is np:
+        iteraciones = np.asarray(iteraciones)
+    xp = modulo_de(iteraciones)
     interior = iteraciones >= pedido.max_iter
     if op.suave and resultado.suave is not None:
-        valores = resultado.suave.astype(np.float64)
+        valores = resultado.suave.astype(xp.float64)
         aplicadas.add("suave")
     else:
-        valores = iteraciones.astype(np.float64)
+        valores = iteraciones.astype(xp.float64)
     valores[interior] = max_iter_color
 
     _, paleta = PALETTE_REGISTRY[pedido.paleta % len(PALETTE_REGISTRY)]
-    rgb = paleta(valores / max_iter_color, max_iter_color, pedido.clase_equiv).astype(np.float32)
+    rgb = paleta(valores / max_iter_color, max_iter_color, pedido.clase_equiv).astype(xp.float32)
 
     if op.iluminacion and resultado.normal_x is not None:
-        rgb *= _sombreado(resultado, op, interior)[..., None]
+        rgb *= _sombreado(resultado, op, interior, xp)[..., None]
         aplicadas.add("iluminacion")
     if op.interior is not None:
-        rgb[interior] = op.interior
+        rgb[interior] = xp.asarray(op.interior, dtype=xp.float32)
     return rgb, aplicadas
 
 
-def _sombreado(resultado: Resultado, op: OpcionesColor, interior: np.ndarray) -> np.ndarray:
+def _sombreado(resultado: Resultado, op: OpcionesColor, interior, xp=np):
     """Factor de brillo por píxel: relieve iluminado (normal map) + bordes oscuros (distancia)."""
     # Relieve: la normal sale de z / (dz/dc). Luz en la dirección `angulo_luz`, a altura h.
     angulo = np.radians(op.angulo_luz)
     h = op.altura_luz
     t = (resultado.normal_x * np.cos(angulo) + resultado.normal_y * np.sin(angulo) + h) / (1.0 + h)
-    t = np.clip(t, 0.0, 1.0)
+    t = xp.clip(t, 0.0, 1.0)
     brillo = 0.3 + 0.9 * t
     # Bordes: a menos de un píxel del conjunto se oscurece, y el borde queda nítido
-    cerca = np.clip(resultado.distancia, 0.0, 1.0)
-    brillo *= 0.35 + 0.65 * np.sqrt(cerca)
+    cerca = xp.clip(resultado.distancia, 0.0, 1.0)
+    brillo *= 0.35 + 0.65 * xp.sqrt(cerca)
     brillo[interior] = 1.0
     return brillo
 

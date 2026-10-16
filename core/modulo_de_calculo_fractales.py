@@ -45,7 +45,27 @@ class Resultado:
 
     def __array__(self, dtype=None, copy=None):
         # np.asarray(resultado) sigue devolviendo las iteraciones, como antes
-        return np.asarray(self.iteraciones, dtype=dtype)
+        return np.asarray(_a_cpu(self.iteraciones), dtype=dtype)
+
+    def _mapear(self, f) -> "Resultado":
+        return Resultado(*(None if x is None else f(x) for x in
+                           (self.iteraciones, self.suave, self.distancia, self.normal_x, self.normal_y)))
+
+    def en_cpu(self) -> "Resultado":
+        """El mismo resultado con todos los arreglos en la RAM (numpy)."""
+        return self._mapear(_a_cpu)
+
+    def en_gpu(self) -> "Resultado":
+        """El mismo resultado con todos los arreglos en la GPU (CuPy)."""
+        return self._mapear(lambda x: x if _esta_en_gpu(x) else _a_gpu(np.ascontiguousarray(x)))
+
+
+def _esta_en_gpu(arreglo) -> bool:
+    return type(arreglo).__module__.startswith("cupy")
+
+
+def _a_cpu(arreglo):
+    return arreglo.get() if _esta_en_gpu(arreglo) else arreglo
 
 
 FRACTAL_REGISTRY: dict[str, dict[str, callable]] = {}
@@ -258,6 +278,9 @@ class calculos_mandelbrot:
         self.bandera_cancelar = ctypes.c_int(0)
         # Si no es None, la perturbación calcula esta grilla polar en vez de la imagen rectangular
         self.grilla_polar: GrillaPolar | None = None
+        # Si es True, la perturbación en GPU devuelve los arreglos en la GPU (CuPy) sin copiarlos
+        # a la RAM: así el coloreo, que también corre en la GPU, los usa directamente
+        self.dejar_en_gpu = False
         # Pasos por lanzamiento en la GPU (se ajusta solo, ver _ajustar_pasos_por_lanzamiento)
         self._pasos_por_lanzamiento = PASOS_INICIALES_POR_LANZAMIENTO
         self._cache_orbita = None
@@ -565,7 +588,8 @@ class calculos_mandelbrot:
                     iniciar = 0
                     if int(pendientes.get()[0]) == 0:
                         break
-            iteraciones, suave, distancia, nx, ny = (x.get() for x in (iteraciones, suave, distancia, nx, ny))
+            if not self.dejar_en_gpu:
+                iteraciones, suave, distancia, nx, ny = (x.get() for x in (iteraciones, suave, distancia, nx, ny))
             pasos = int(pasos_gpu.get()[0])
 
         self._revisar_cancelacion()

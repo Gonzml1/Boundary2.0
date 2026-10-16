@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 
 from .modulo_de_calculo_fractales import GrillaPolar, FRACTAL_REGISTRY
-from .render import colorear, PedidoRender
+from .render import colorear, PedidoRender, a_numpy_uint8, COLOREAR_EN_GPU
 
 log = logging.getLogger(__name__)
 
@@ -156,6 +156,7 @@ def calcular_franja(motor, pedido: PedidoRender, geo: GeometriaTira, franja: int
                                  pedido.tipo_fractal, pedido.real, pedido.imag)
         motor.pedir_suave = op.suave
         motor.pedir_derivada = op.iluminacion
+        motor.dejar_en_gpu = COLOREAR_EN_GPU
         motor.grilla_polar = GrillaPolar(
             centro=(geo.centro_re, geo.centro_im),
             radio_m=np.ascontiguousarray(radio_m[inicio:fin]), radio_e=np.ascontiguousarray(radio_e[inicio:fin]),
@@ -167,7 +168,7 @@ def calcular_franja(motor, pedido: PedidoRender, geo: GeometriaTira, franja: int
         finally:
             motor.grilla_polar = None
         rgb, _ = colorear(resultado, pedido)
-        salida[inicio:fin] = np.clip(rgb, 0, 255).astype(np.uint8)
+        salida[inicio:fin] = a_numpy_uint8(rgb)
         del resultado, rgb
     return salida
 

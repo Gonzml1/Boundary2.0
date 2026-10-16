@@ -84,6 +84,12 @@ Las tres se activan y desactivan por separado. Funcionan con los métodos de per
 
 Las opciones se respetan igual en pantalla, en "Guardar imagen" y en el video.
 
+Si hay una GPU, el coloreo (paleta, luz, interior y antialiasing) se hace en ella, con los
+resultados del cálculo sin pasar por la RAM: una imagen 1920x1080 con suave, luz y antialiasing se
+colorea en ~20 ms en vez de ~1,1 s con numpy. Los colores son los mismos (mismas tablas y mismas
+cuentas): solo con luz y antialiasing juntos, unos pocos píxeles pueden variar 1 nivel de 255 por el
+redondeo del promedio. Con la variable de entorno `ABOUNDARY_COLOREO_CPU=1` se colorea con numpy.
+
 ### Video de zoom (panel "6. EXPORTAR")
 
 Genera un zoom que arranca con el fractal entero y termina exactamente en la vista actual. En el
@@ -180,7 +186,9 @@ def hacer_mi_metodo(self) -> np.ndarray:
     ...  # devolver una matriz (height, width) de iteraciones, o un Resultado con más salidas
 ```
 
-Lo mismo con las paletas y `@register_palette` en `core/paletas.py`.
+Lo mismo con las paletas y `@register_palette` en `core/paletas.py`. Una paleta recibe `norm`
+como arreglo de numpy o de CuPy: para que funcione en los dos, usar `xp = modulo_de(norm)` y
+`xp.` en lugar de `np.` (ver las paletas existentes).
 
 ### Editar la interfaz
 

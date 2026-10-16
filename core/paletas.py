@@ -16,39 +16,64 @@ def register_palette(palette_name: str):
 # Todas las paletas reciben norm = iteración / max_iter. Con el coloreo suave la iteración
 # tiene parte fraccionaria, así que las tablas de colores (LUT) se interpolan en vez de
 # indexarse con un entero: con valores enteros el resultado es el mismo de siempre.
+#
+# Funcionan igual con arreglos de numpy (CPU) o de CuPy (GPU): `xp` es el módulo de los datos.
+# Las fórmulas son las mismas; colorear en la GPU evita copiar los datos crudos a la RAM.
+
+def modulo_de(arreglo):
+    """numpy o cupy, según dónde esté el arreglo."""
+    if type(arreglo).__module__.startswith("cupy"):
+        import cupy
+        return cupy
+    return np
+
 
 @lru_cache(maxsize=64)
-def _lut(nombre: str, n: int) -> np.ndarray:
+def _lut_cpu(nombre: str, n: int) -> np.ndarray:
     """LUT de n colores (n, 3) en float 0..255 del colormap de Matplotlib (se cachea)."""
     return matplotlib.colormaps[nombre].resampled(n)(np.arange(n))[:, :3] * 255.0
 
 
-def _interpolar(lut: np.ndarray, pos: np.ndarray, ciclico: bool) -> np.ndarray:
+_luts_gpu: dict = {}
+
+def _lut(nombre: str, n: int, xp) -> np.ndarray:
+    """La misma LUT, en la memoria de los datos (en GPU se sube una vez y se cachea)."""
+    if xp is np:
+        return _lut_cpu(nombre, n)
+    clave = (nombre, n)
+    if clave not in _luts_gpu:
+        _luts_gpu[clave] = xp.asarray(_lut_cpu(nombre, n))
+    return _luts_gpu[clave]
+
+
+def _interpolar(lut, pos, ciclico: bool, xp=np):
     """Color en la posición `pos` (en unidades de entradas de la LUT), interpolando linealmente."""
     n = len(lut)
-    base = np.floor(pos)
+    base = xp.floor(pos)
     f = (pos - base)[..., None]
-    i0 = base.astype(np.int64)
+    i0 = base.astype(xp.int64)
     if ciclico:
         i0 %= n
         i1 = (i0 + 1) % n
     else:
-        i0 = np.clip(i0, 0, n - 1)
-        i1 = np.minimum(i0 + 1, n - 1)
-    return (lut[i0] * (1.0 - f) + lut[i1] * f).astype(np.uint8)
+        i0 = xp.clip(i0, 0, n - 1)
+        i1 = xp.minimum(i0 + 1, n - 1)
+    return (lut[i0] * (1.0 - f) + lut[i1] * f).astype(xp.uint8)
 
 
-def _paleta_lineal(nombre: str, norm: np.ndarray) -> np.ndarray:
+def _paleta_lineal(nombre: str, norm):
     """norm ∈ [0, 1] recorre una vez el colormap (LUT de 256). Sin interpolar: con 256 niveles
     el suave ya se nota, y así los colormaps cualitativos (Set1, Paired...) no mezclan colores."""
-    indices = (np.clip(norm, 0.0, 1.0) * 255).astype(np.uint8)
-    return _lut(nombre, 256)[indices].astype(np.uint8)
+    xp = modulo_de(norm)
+    indices = (xp.clip(norm, 0.0, 1.0) * 255).astype(xp.uint8)
+    return _lut(nombre, 256, xp)[indices].astype(xp.uint8)
 
 
-def _paleta_ciclica(nombre: str, norm: np.ndarray, max_iter: int, ciclo: int) -> np.ndarray:
+def _paleta_ciclica(nombre: str, norm, max_iter: int, ciclo: int):
     """El colormap se repite cada `ciclo` iteraciones."""
-    iters = np.clip(norm * max_iter, 0, max_iter)
-    return _interpolar(_lut(nombre, ciclo), iters, ciclico=True)
+    xp = modulo_de(norm)
+    iters = xp.clip(norm * max_iter, 0, max_iter)
+    return _interpolar(_lut(nombre, ciclo, xp), iters, True, xp)
 
 
 @register_palette("Iteraciones variables (Twilight Shifted)")
@@ -65,10 +90,11 @@ def _paleta_rojo_amarillo(norm: np.ndarray, max_iter: int, clase_equiv: int, t_a
     - G crece linealmente de 0→255 para norm en [0,0.5], luego se mantiene 255
     - B se activa solo para norm≥0.5, crece de 0→255 en [0.5,1]
     """
-    r = np.uint8(255 * np.ones_like(norm))
-    g = np.uint8((np.clip(norm * 2, 0, 1) * 255).clip(0, 255))
-    b = np.uint8((np.clip((norm - 0.5) * 2, 0, 1) * 255).clip(0, 255))
-    return np.dstack([r, g, b])
+    xp = modulo_de(norm)
+    r = (255 * xp.ones_like(norm)).astype(xp.uint8)
+    g = (xp.clip(norm * 2, 0, 1) * 255).clip(0, 255).astype(xp.uint8)
+    b = (xp.clip((norm - 0.5) * 2, 0, 1) * 255).clip(0, 255).astype(xp.uint8)
+    return xp.dstack([r, g, b])
 
 @register_palette("HSV")
 def _paleta_hsv(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
@@ -81,10 +107,11 @@ def _paleta_psicodelica(norm: np.ndarray, max_iter: int, clase_equiv: int, t_act
     Púrpura psicodélica usando funciones sinusoidales:
     - Tres ciclos de color, fases desplazadas en R,G,B
     """
-    r = np.uint8((0.5 + 0.5 * np.sin(2 * np.pi * norm * 3 + 0)) * 255)
-    g = np.uint8((0.5 + 0.5 * np.sin(2 * np.pi * norm * 3 + 2)) * 255)
-    b = np.uint8((0.5 + 0.5 * np.sin(2 * np.pi * norm * 3 + 4)) * 255)
-    return np.dstack([r, g, b])
+    xp = modulo_de(norm)
+    r = ((0.5 + 0.5 * xp.sin(2 * np.pi * norm * 3 + 0)) * 255).astype(xp.uint8)
+    g = ((0.5 + 0.5 * xp.sin(2 * np.pi * norm * 3 + 2)) * 255).astype(xp.uint8)
+    b = ((0.5 + 0.5 * xp.sin(2 * np.pi * norm * 3 + 4)) * 255).astype(xp.uint8)
+    return xp.dstack([r, g, b])
 
 @register_palette("Accent")
 def _paleta_accent(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
@@ -140,10 +167,11 @@ def _paleta_iters_hsv(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actua
 @register_palette("Grises cíclico")
 def _paleta_grises_ciclico(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actual: float=0.0, thickness: float=0.0) -> np.ndarray:
     """Rampa de gris de 0 a 255 que se repite cada 64 iteraciones."""
+    xp = modulo_de(norm)
     ciclo = 64
-    pos = np.clip(norm * max_iter, 0, max_iter) % ciclo
-    gray = np.uint8((pos / (ciclo - 1) * 255).clip(0, 255))
-    return np.dstack([gray, gray, gray])
+    pos = xp.clip(norm * max_iter, 0, max_iter) % ciclo
+    gray = (pos / (ciclo - 1) * 255).clip(0, 255).astype(xp.uint8)
+    return xp.dstack([gray, gray, gray])
 
 
 @register_palette("Iteraciones (Plasma ciclo 64)")
@@ -165,12 +193,13 @@ def _paleta_bandas_rgb(norm: np.ndarray, max_iter: int, clase_equiv: int, t_actu
     - franja1: verde crece de 0→1
     - franja2: azul crece de 0→1
     """
+    xp = modulo_de(norm)
     pos = norm * 3  # pos ∈ [0,3)
     # En la primera porción (pos < 1): r=pos, g=0,b=0
     # Segunda (1 ≤ pos < 2): r=2-pos, g=pos-1, b=0
     # Tercera (2 ≤ pos < 3): r=0, g=3-pos, b=pos-2
-    r = np.where(pos < 1, pos, np.where(pos < 2, 2 - pos, 0))
-    g = np.where(pos < 1, 0, np.where(pos < 2, pos - 1, 3 - pos))
-    b = np.where(pos < 2, 0, pos - 2)
-    rgb = np.dstack([r.clip(0,1), g.clip(0,1), b.clip(0,1)])
-    return np.uint8(rgb * 255)
+    r = xp.where(pos < 1, pos, xp.where(pos < 2, 2 - pos, 0))
+    g = xp.where(pos < 1, 0, xp.where(pos < 2, pos - 1, 3 - pos))
+    b = xp.where(pos < 2, 0, pos - 2)
+    rgb = xp.dstack([r.clip(0,1), g.clip(0,1), b.clip(0,1)])
+    return (rgb * 255).astype(xp.uint8)
