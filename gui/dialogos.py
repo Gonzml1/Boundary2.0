@@ -3,6 +3,7 @@ import os
 import time
 import shutil
 import logging
+import gc
 import math
 import threading
 from collections import deque
@@ -16,7 +17,8 @@ from PyQt5.QtGui import QImage, QPixmap
 import numpy as np
 from PIL import Image
 
-from core.modulo_de_calculo_fractales import RenderCancelado, FRACTAL_REGISTRY, variante_rapida
+from core.modulo_de_calculo_fractales import (RenderCancelado, FRACTAL_REGISTRY, variante_rapida,
+                                             es_falta_de_memoria, liberar_memoria_gpu)
 from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, PedidoRender, OpcionesColor, guardar_imagen
 from core import exponencial
@@ -267,7 +269,7 @@ class WorkerVideo(QThread):
                 if f is None:
                     return
                 try:
-                    rgb = exponencial.calcular_franja(renderizador.motor, replace(pedido, tipo_calculo=metodo), geo, f)
+                    rgb = self._franja_con_reintentos(renderizador, replace(pedido, tipo_calculo=metodo), geo, f)
                 except RenderCancelado:
                     return
                 except Exception as e:
@@ -322,6 +324,21 @@ class WorkerVideo(QThread):
                 f"Continuar video… y elegí la carpeta {self.carpeta}")
             return
         self._terminar(pausa, total)
+
+    def _franja_con_reintentos(self, renderizador, pedido, geo, f, intentos: int = 3):
+        """Si falta memoria (la RAM o la memoria comprometida de Windows se llenó por un momento),
+        libera lo que puede, espera un poco y reintenta en vez de cortar el video."""
+        for intento in range(intentos):
+            try:
+                return exponencial.calcular_franja(renderizador.motor, pedido, geo, f)
+            except Exception as e:
+                if not es_falta_de_memoria(e) or intento == intentos - 1:
+                    raise
+                log.warning("Falta de memoria en la franja %d (%s): se libera memoria y se reintenta", f, e)
+                renderizador.motor._cache_orbita = None
+                gc.collect()
+                liberar_memoria_gpu()
+                time.sleep(2 * (intento + 1))
 
     def _terminar(self, pausa, total):
         """Pausa final (copias del último cuadro del zoom) y mp4 si están todos los cuadros."""

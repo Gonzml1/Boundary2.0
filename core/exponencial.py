@@ -23,6 +23,12 @@ from .render import colorear, PedidoRender
 log = logging.getLogger(__name__)
 
 FILAS_POR_FRANJA = 512
+# Cada franja se calcula y colorea de a partes de a lo sumo estos puntos: colorear necesita
+# varios arreglos temporales por punto, y de una vez (7 M de puntos con antialiasing) eran picos
+# de ~1 GB que podían chocar con el límite de memoria de Windows. Con 2,5 M el pico baja ~40 % y
+# además va más rápido (cada parte entra en un solo lote de la GPU). Las partes usan la misma
+# tabla BLA y el mismo modo que la franja entera, así que el resultado es idéntico.
+PUNTOS_POR_PARTE = 2_500_000
 # Puntos de la tira por píxel en el borde del cuadro (en el centro siempre hay más): 1 alcanza
 # para que se vea nítido; con antialiasing se duplica y cada píxel promedia 2x2 muestras
 DENSIDAD = 1.0
@@ -135,24 +141,35 @@ def calcular_franja(motor, pedido: PedidoRender, geo: GeometriaTira, franja: int
     dtheta = math.frexp(2 * math.pi / geo.n_angulos)
     du = Decimal(geo.du)
     m_ult, e_ult = _radios(geo, geo.filas - 1, 1)
-    grilla = GrillaPolar(
-        centro=(geo.centro_re, geo.centro_im), radio_m=radio_m, radio_e=radio_e, cos_t=cos_t, sin_t=sin_t,
-        dtheta=dtheta, paso_min=_decimal_fe(radio_m[-1], radio_e[-1]) * du,
-        paso_bits=_decimal_fe(m_ult[0], e_ult[0]) * du, e_radio_max=int(radio_e[0]),
-    )
+    # Valores de la franja entera (no de cada parte): misma precisión, mismo modo y misma tabla BLA
+    paso_min = _decimal_fe(radio_m[-1], radio_e[-1]) * du
+    paso_bits = _decimal_fe(m_ult[0], e_ult[0]) * du
+    e_radio_max = int(radio_e[0])
     op = pedido.opciones
-    motor.actualizar_fractal(geo.centro_re, geo.centro_re, geo.centro_im, geo.centro_im,
-                             geo.n_angulos, n, pedido.max_iter, metodo_para_tira(pedido),
-                             pedido.tipo_fractal, pedido.real, pedido.imag)
-    motor.pedir_suave = op.suave
-    motor.pedir_derivada = op.iluminacion
-    motor.grilla_polar = grilla
-    try:
-        resultado = motor.calcular_fractal()
-    finally:
-        motor.grilla_polar = None
-    rgb, _ = colorear(resultado, pedido)
-    return np.ascontiguousarray(np.clip(rgb, 0, 255).astype(np.uint8))
+    metodo = metodo_para_tira(pedido)
+    salida = np.empty((n, geo.n_angulos, 3), dtype=np.uint8)
+    filas_por_parte = max(1, PUNTOS_POR_PARTE // geo.n_angulos)
+    for inicio in range(0, n, filas_por_parte):
+        fin = min(n, inicio + filas_por_parte)
+        motor.actualizar_fractal(geo.centro_re, geo.centro_re, geo.centro_im, geo.centro_im,
+                                 geo.n_angulos, fin - inicio, pedido.max_iter, metodo,
+                                 pedido.tipo_fractal, pedido.real, pedido.imag)
+        motor.pedir_suave = op.suave
+        motor.pedir_derivada = op.iluminacion
+        motor.grilla_polar = GrillaPolar(
+            centro=(geo.centro_re, geo.centro_im),
+            radio_m=np.ascontiguousarray(radio_m[inicio:fin]), radio_e=np.ascontiguousarray(radio_e[inicio:fin]),
+            cos_t=cos_t, sin_t=sin_t, dtheta=dtheta,
+            paso_min=paso_min, paso_bits=paso_bits, e_radio_max=e_radio_max,
+        )
+        try:
+            resultado = motor.calcular_fractal()
+        finally:
+            motor.grilla_polar = None
+        rgb, _ = colorear(resultado, pedido)
+        salida[inicio:fin] = np.clip(rgb, 0, 255).astype(np.uint8)
+        del resultado, rgb
+    return salida
 
 
 def ruta_franja(carpeta_tira: str, franja: int) -> str:

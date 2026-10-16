@@ -79,6 +79,8 @@ def liberar_memoria_gpu() -> None:
 
 
 def es_falta_de_memoria(error: Exception) -> bool:
+    if isinstance(error, MemoryError):          # numpy: "Unable to allocate ..."
+        return True
     texto = str(error)
     return any(t in texto for t in ("cudaErrorMemoryAllocation", "out of memory", "cudaErrorAlreadyMapped",
                                     "OutOfMemory"))
