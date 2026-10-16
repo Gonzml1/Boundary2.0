@@ -37,6 +37,8 @@ class ConfigVideo:
     suavizado: bool = False  # arranca y frena suave en vez de ir a velocidad constante
     pausa: float = 0.0       # segundos quieto en la última imagen
     usar_cpu: bool = True    # si el método es de GPU, la CPU calcula cuadros al mismo tiempo
+    modo: str = "normal"     # "normal" (cuadro por cuadro) o "exponencial" (tira, ver core/exponencial.py)
+    vueltas: float = 0.0     # solo en modo exponencial: vueltas que gira la imagen en todo el zoom
 
     @property
     def cuadros_zoom(self) -> int:

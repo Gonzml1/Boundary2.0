@@ -225,6 +225,40 @@ HD bool menor_pos(FF a, FF b) {
 HD bool positivo(FF a) { return a.m > 0.0f && finito(a.m); }
 HD bool es_cero(FF a)  { return a.m == 0.0f; }
 
+// Un FE pasado al tipo real R de cada modo
+template<class R> HD R real_de_fe(FE x);
+template<> HD double real_de_fe<double>(FE x) { return a_double(x); }
+template<> HD FE     real_de_fe<FE>(FE x)     { return x; }
+template<> HD FF     real_de_fe<FF>(FE x)     { return ff_normalizar((float)x.m, x.e); }
+
+// ---------------------------------------------------------------------------
+// Grilla de puntos a calcular
+// ---------------------------------------------------------------------------
+// Rectangular (una imagen común): el punto (i, j) tiene dc = (bx + i sx, by + j sy).
+// Polar (la tira del mapa exponencial): dc = radio_j (cos_i, sin_i), con el paso local
+// radio_j * dtheta. Los radios y los cosenos/senos vienen en tablas calculadas una sola vez
+// (en Python), así CPU y GPU usan exactamente los mismos valores y dan lo mismo bit a bit.
+struct Grilla {
+    FE bx, by, sx, sy, paso;
+    const double* radio_m;      // polar si no es nulo (radio = radio_m * 2^radio_e)
+    const int* radio_e;
+    const double* cos_t;
+    const double* sin_t;
+    FE dtheta;
+};
+
+template<class C>
+HD C dc_de_grilla(const Grilla& g, int i, int j, FE* paso)
+{
+    if (g.radio_m) {
+        FE r = fe_normalizar(g.radio_m[j], g.radio_e[j]);
+        *paso = r * g.dtheta;
+        return complejo_fe<C>(r * fe(g.cos_t[i]), r * fe(g.sin_t[i]));
+    }
+    *paso = g.paso;
+    return complejo_fe<C>(g.bx + g.sx * fe((double)i), g.by + g.sy * fe((double)j));
+}
+
 // ---------------------------------------------------------------------------
 // Fórmulas
 // ---------------------------------------------------------------------------

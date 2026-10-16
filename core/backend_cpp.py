@@ -7,9 +7,10 @@ import numpy as np
 log = logging.getLogger(__name__)
 
 DIRECCION_DE_CARPETA = "codigos_cpp"
-RUTA_CPP = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, DIRECCION_DE_CARPETA)
-)
+# ABOUNDARY_DLLS permite usar DLLs de otra carpeta (por ejemplo, para probar una versión nueva
+# mientras la app sigue abierta usando las de codigos_cpp)
+RUTA_CPP = os.path.abspath(os.environ.get("ABOUNDARY_DLLS") or
+                           os.path.join(os.path.dirname(__file__), os.pardir, DIRECCION_DE_CARPETA))
 if hasattr(os, 'add_dll_directory') and os.path.isdir(RUTA_CPP):
     os.add_dll_directory(RUTA_CPP)
 
@@ -62,7 +63,7 @@ julia_cpp = free_julia = None
 burning_ship_cpp = free_burning_ship = None
 circulo_cpp = free_circulo = None
 pert_crear = pert_parametro = pert_largo = pert_liberar = pert_preparar_bla = pert_render = None
-pert_bytes_orbita = pert_bytes_bla = pert_exportar = pert_tam_estado = None
+pert_bytes_orbita = pert_bytes_bla = pert_exportar = pert_tam_estado = pert_render_polar = None
 calcular_mandelbrot_gmp_puro = None
 
 # --- Instanciación de backends específicos ---
@@ -118,6 +119,16 @@ if _perturbacion:
          _MATRIZ_I32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _BANDERA],
         ctypes.c_longlong
     )
+    # Lo mismo sobre una grilla polar (la tira del mapa exponencial). Opcional: una DLL vieja no la tiene
+    _ARRAY_I32 = np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags='C_CONTIGUOUS')
+    if hasattr(_perturbacion.lib, 'pert_render_polar'):
+        pert_render_polar = _perturbacion.wrap_func(
+            'pert_render_polar',
+            [ctypes.c_void_p, _ARRAY_F64, _ARRAY_I32, _ARRAY_F64, _ARRAY_F64, *_FE,
+             ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+             _MATRIZ_I32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _MATRIZ_F32, _BANDERA],
+            ctypes.c_longlong
+        )
     pert_bytes_orbita = _perturbacion.wrap_func('pert_bytes_orbita', [ctypes.c_void_p], ctypes.c_longlong)
     pert_tam_estado = _perturbacion.wrap_func('pert_tam_estado', [ctypes.c_int], ctypes.c_int)
     pert_bytes_bla = _perturbacion.wrap_func('pert_bytes_bla', [ctypes.c_void_p], ctypes.c_longlong)

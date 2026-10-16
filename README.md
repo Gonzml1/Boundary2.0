@@ -106,6 +106,28 @@ la vista actual.
   más abajo), así que mezclar cuadros no se nota. Los PNG se comprimen en otros hilos mientras se
   calculan los cuadros siguientes.
 
+#### Modo rápido (mapa exponencial)
+
+En "Tipo de video" se puede elegir **Rápido (mapa exponencial)**. En coordenadas (logaritmo del radio,
+ángulo) alrededor del centro del zoom, acercar la imagen equivale a desplazarse. Entonces, en vez de
+calcular cada cuadro, se calcula una sola **tira**: cada fila es un anillo alrededor del destino, desde
+el radio que cubre el conjunto entero hasta el más chico que hace falta en el último cuadro. Después
+cada cuadro se arma deformando la tira (en GPU, ~5 ms por cuadro), sin calcular ninguna iteración.
+
+- **El zoom queda centrado** en el destino desde el primer cuadro: el primer cuadro se aleja lo
+  suficiente como para mostrar el conjunto entero.
+- **Rotación**: "Rotación (vueltas)" hace girar la imagen durante el zoom, sin costo extra.
+- **La tira se guarda** en la subcarpeta `tira/` del video, ya coloreada. Se puede cancelar y
+  continuar, y rehacer cuadros sin recalcularla. Cambiar la paleta sí obliga a calcularla de nuevo.
+- **Cuánto conviene** depende de cuántos cuadros dura cada duplicación del zoom; el diálogo lo estima
+  antes de renderizar. Por ejemplo, en 1080p a 60 fps, un zoom a 1e-30 en 60 s calcula ~12 veces menos
+  que cuadro por cuadro. Un zoom a 1e-300 en 30 s, en cambio, calcula más (hay tan pocos cuadros por
+  duplicación que no hay nada que reusar): ahí conviene el modo normal.
+- La tira se calcula con perturbación sobre una grilla polar (`pert_render_polar` en la DLL y el mismo
+  kernel de GPU); los radios y ángulos van en tablas, así CPU y GPU siguen dando lo mismo. Un cuadro del
+  mapa exponencial y el mismo cuadro calculado normalmente se ven iguales; difieren solo en los
+  filamentos más finos, porque cada píxel muestrea un punto apenas distinto.
+
 #### Qué método usar para un video
 
 | Método | Velocidad | Precisión |
@@ -137,6 +159,7 @@ core/funciones_kernel.py             kernels CuPy
 core/backend_cpp.py                  carga de las DLL
 core/paletas.py                      paletas de color
 core/video.py                        planificación del video de zoom y su plan guardado (video.json)
+core/exponencial.py                  modo rápido del video: la tira del mapa exponencial y el armado de cuadros
 core/favoritos.py                    ubicaciones guardadas
 codigos_cpp/                         fuentes C++ (perturbacion_core.h: núcleo compartido CPU/GPU)
 ```

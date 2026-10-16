@@ -3,6 +3,7 @@ import os
 import time
 import shutil
 import logging
+import math
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -12,14 +13,33 @@ from decimal import Decimal
 from PyQt5 import QtWidgets
 from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
+import numpy as np
+from PIL import Image
 
 from core.modulo_de_calculo_fractales import RenderCancelado, FRACTAL_REGISTRY, variante_rapida
 from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, PedidoRender, OpcionesColor, guardar_imagen
+from core import exponencial
 from core.video import (ConfigVideo, planificar_zoom, armar_mp4, nombre_cuadro, guardar_plan,
                         cargar_plan, cuadros_hechos, cuadros_faltantes, describir_cuadros, leer_cuadros)
 
 log = logging.getLogger(__name__)
+
+MODOS_VIDEO = {"Normal (cuadro por cuadro)": "normal", "Rápido (mapa exponencial)": "exponencial"}
+FRANJAS_EN_MEMORIA = 64      # franjas de la tira que se guardan cargadas al armar los cuadros
+
+
+def modulo_arreglos():
+    """CuPy si hay GPU (armar los cuadros es mucho más rápido), si no NumPy."""
+    try:
+        from core.modulo_de_calculo_fractales import BACKENDS_DISPONIBLES
+        if BACKENDS_DISPONIBLES.get("gpu"):
+            import cupy
+            return cupy
+    except Exception:
+        pass
+    return np
+
 
 RESOLUCIONES = {"Full HD (1920x1080)": (1920, 1080), "4K (3840x2160)": (3840, 2160), "HD (1280x720)": (1280, 720)}
 ANCHO_VISTA_PREVIA = 320
@@ -106,6 +126,9 @@ class WorkerVideo(QThread):
         self.progreso.emit(hechos, total)
 
     def run(self):
+        if self.config.modo == "exponencial":
+            self._run_exponencial()
+            return
         p, cfg = self.pedido, self.config
         guardar_plan(self.carpeta, p, cfg, PALETTE_REGISTRY[p.paleta][0])
         plan = list(planificar_zoom(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto,
@@ -196,6 +219,128 @@ class WorkerVideo(QThread):
         self.terminado.emit(f"Video listo: {mp4}" if mp4 else f"Cuadros listos en {self.carpeta}")
 
 
+    def _run_exponencial(self):
+        """Modo rápido: calcula la tira (por franjas, con CPU y GPU a la vez) y arma cada cuadro
+        leyéndola. Las franjas y los cuadros ya hechos se saltean (se puede retomar)."""
+        cfg = self.config
+        guardar_plan(self.carpeta, self.pedido, cfg, PALETTE_REGISTRY[self.pedido.paleta][0])
+        pedido = replace(self.pedido, tipo_calculo=exponencial.metodo_para_tira(self.pedido))
+        geo = exponencial.geometria_tira(pedido, cfg.ancho, cfg.alto)
+        carpeta_tira = os.path.join(self.carpeta, "tira")
+        os.makedirs(carpeta_tira, exist_ok=True)
+        ln_pasos = exponencial.ln_pasos_cuadros(geo, cfg.cuadros_zoom, cfg.suavizado)
+        existe = lambda i: os.path.exists(os.path.join(self.carpeta, nombre_cuadro(i)))
+        if self.rehacer is None:
+            cuadros = [i for i in range(cfg.cuadros_zoom) if not existe(i)]
+            pausa = [i for i in range(cfg.cuadros_zoom, cfg.cuadros) if not existe(i)]
+        else:
+            cuadros = [i for i in self.rehacer if i < cfg.cuadros_zoom]
+            pausa = [i for i in self.rehacer if i >= cfg.cuadros_zoom]
+        necesarias = sorted({f for i in cuadros for f in exponencial.franjas_para_cuadro(geo, ln_pasos[i])})
+        franjas = [f for f in necesarias if not os.path.exists(exponencial.ruta_franja(carpeta_tira, f))]
+        total = len(franjas) + len(cuadros) + len(pausa)
+        self._hechos = 0
+        self.empezo.emit(0, total)
+        log.info("Video rápido: tira de %d x %d (%d franjas por calcular), %d cuadros por armar",
+                 geo.filas, geo.n_angulos, len(franjas), len(cuadros))
+
+        # 1) La tira, por franjas: los métodos (GPU y su versión de CPU) se reparten las franjas
+        metodos = metodos_para_video(pedido, cfg.usar_cpu)
+        self._renderizadores = [Renderizador(tam_cache=0) for _ in metodos]
+        pendientes = iter(franjas)
+        espacio = threading.Semaphore(MAX_CUADROS_EN_ESPERA)
+
+        def guardar(ruta, rgb, funcion):
+            try:
+                funcion(ruta, rgb)
+                self._contar_hecho(total)
+            except Exception as e:
+                self._error = e
+                self.cancelar()
+            finally:
+                espacio.release()
+
+        def calcular(metodo, renderizador, guardado):
+            while not self.isInterruptionRequested():
+                with self._candado:
+                    f = next(pendientes, None)
+                if f is None:
+                    return
+                try:
+                    rgb = exponencial.calcular_franja(renderizador.motor, replace(pedido, tipo_calculo=metodo), geo, f)
+                except RenderCancelado:
+                    return
+                except Exception as e:
+                    log.exception("Falló la franja %d con %s", f, metodo)
+                    self._error = e
+                    self.cancelar()
+                    return
+                espacio.acquire()
+                guardado.submit(guardar, exponencial.ruta_franja(carpeta_tira, f), rgb, exponencial.guardar_franja)
+
+        with ThreadPoolExecutor(HILOS_GUARDADO) as guardado:
+            hilos = [threading.Thread(target=calcular, args=(m, r, guardado), daemon=True)
+                     for m, r in zip(metodos, self._renderizadores)]
+            for hilo in hilos:
+                hilo.start()
+            for hilo in hilos:
+                hilo.join()
+
+            # 2) Los cuadros: se arman leyendo la tira (sin calcular iteraciones)
+            if self._error is None and not self.isInterruptionRequested():
+                xp = modulo_arreglos()
+                cargadas = {}
+
+                def cargar(f):
+                    if f not in cargadas:
+                        if len(cargadas) >= FRANJAS_EN_MEMORIA:
+                            cargadas.pop(next(iter(cargadas)))
+                        arr = np.asarray(Image.open(exponencial.ruta_franja(carpeta_tira, f)).convert("RGB"))
+                        cargadas[f] = xp.asarray(arr)
+                    return cargadas[f]
+
+                for i in cuadros:
+                    if self.isInterruptionRequested() or self._error is not None:
+                        break
+                    t = i / max(1, cfg.cuadros_zoom - 1)
+                    try:
+                        rgb = exponencial.armar_cuadro(geo, ln_pasos[i], 2 * math.pi * cfg.vueltas * t, cargar,
+                                                       pedido.opciones.antialiasing, xp)
+                    except Exception as e:
+                        log.exception("Falló el armado del cuadro %d", i + 1)
+                        self._error = e
+                        break
+                    espacio.acquire()
+                    guardado.submit(guardar, os.path.join(self.carpeta, nombre_cuadro(i)), rgb, guardar_imagen)
+
+        if self._error is not None:
+            self.terminado.emit(f"El video se detuvo por un error: {self._error}")
+            return
+        if self.isInterruptionRequested():
+            self.terminado.emit(
+                f"Video cancelado ({self._hechos}/{total} pasos). Para seguirlo: Video de zoom → "
+                f"Continuar video… y elegí la carpeta {self.carpeta}")
+            return
+        self._terminar(pausa, total)
+
+    def _terminar(self, pausa, total):
+        """Pausa final (copias del último cuadro del zoom) y mp4 si están todos los cuadros."""
+        cfg = self.config
+        ultimo = os.path.join(self.carpeta, nombre_cuadro(cfg.cuadros_zoom - 1))
+        if pausa and os.path.exists(ultimo):
+            for i in pausa:
+                shutil.copyfile(ultimo, os.path.join(self.carpeta, nombre_cuadro(i)))
+                self._contar_hecho(total)
+        faltan = cuadros_faltantes(self.carpeta, cfg)
+        if faltan:
+            cuantos = "falta 1 cuadro" if len(faltan) == 1 else f"faltan {len(faltan)} cuadros"
+            self.terminado.emit(f"Listo, pero {cuantos} ({describir_cuadros(faltan)}): "
+                                f"completalos con Continuar video… o Rehacer cuadros…")
+            return
+        mp4 = armar_mp4(self.carpeta, cfg.fps)
+        self.terminado.emit(f"Video listo: {mp4}" if mp4 else f"Cuadros listos en {self.carpeta}")
+
+
 class WorkerVistaPrevia(QThread):
     """Renderiza el recorrido del video a baja resolución, en memoria."""
     cuadro_listo = pyqtSignal(int, int, object)   # índice, total, QImage
@@ -210,7 +355,37 @@ class WorkerVistaPrevia(QThread):
         self.requestInterruption()
         self._renderizador.cancelar()
 
+    def _run_exponencial(self):
+        p, cfg = self.pedido, self.config
+        pedido = replace(p, tipo_calculo=exponencial.metodo_para_tira(p))
+        geo = exponencial.geometria_tira(pedido, cfg.ancho, cfg.alto)
+        franjas = []
+        for f in range(geo.franjas):
+            if self.isInterruptionRequested():
+                return
+            franjas.append(exponencial.calcular_franja(self._renderizador.motor, pedido, geo, f))
+        ln_pasos = exponencial.ln_pasos_cuadros(geo, cfg.cuadros_zoom, cfg.suavizado)
+        imagen = None
+        for i in range(cfg.cuadros):
+            if self.isInterruptionRequested():
+                return
+            if i < cfg.cuadros_zoom:
+                t = i / max(1, cfg.cuadros_zoom - 1)
+                rgb = exponencial.armar_cuadro(geo, ln_pasos[i], 2 * math.pi * cfg.vueltas * t,
+                                               lambda f: franjas[f], False)[::-1].copy()
+                alto, ancho, _ = rgb.shape
+                imagen = QImage(rgb.data, ancho, alto, 3 * ancho, QImage.Format_RGB888).copy()
+            self.cuadro_listo.emit(i, cfg.cuadros, imagen)
+
     def run(self):
+        if self.config.modo == "exponencial":
+            try:
+                self._run_exponencial()
+            except RenderCancelado:
+                pass
+            except Exception:
+                log.exception("Falló la vista previa del video")
+            return
         p, cfg = self.pedido, self.config
         plan = list(planificar_zoom(p.xmin, p.xmax, p.ymin, p.ymax, p.ancho, p.alto,
                                     cfg.cuadros_zoom, p.max_iter, cfg.suavizado))
@@ -319,6 +494,17 @@ class DialogoVideo(QtWidgets.QDialog):
         self.pausa.setDecimals(1)
         self.pausa.setSuffix(" s")
         self.pausa.setValue(float(ajustes.value("video/pausa", 0.0)))
+        self.modo = QtWidgets.QComboBox()
+        self.modo.addItems(list(MODOS_VIDEO))
+        self.modo.setCurrentText(ajustes.value("video/modo", "Normal (cuadro por cuadro)"))
+        self.modo.setToolTip("Rápido: calcula cada zona del fractal una sola vez y arma los cuadros "
+                             "deformando esa 'tira'. El zoom queda centrado en el destino desde el principio.")
+        self.vueltas = QtWidgets.QDoubleSpinBox()
+        self.vueltas.setRange(-50.0, 50.0)
+        self.vueltas.setDecimals(2)
+        self.vueltas.setSingleStep(0.25)
+        self.vueltas.setValue(float(ajustes.value("video/vueltas", 0.0)))
+        self.vueltas.setToolTip("Vueltas que gira la imagen en todo el zoom (solo en el modo rápido)")
         self.usar_cpu = QtWidgets.QCheckBox("Calcular también con la CPU (más rápido)")
         self.usar_cpu.setChecked(ajustes.value("video/usar_cpu", True, type=bool))
         self.resumen = QtWidgets.QLabel()
@@ -330,6 +516,8 @@ class DialogoVideo(QtWidgets.QDialog):
         formulario.addRow("", self.suavizado)
         formulario.addRow("Pausa en la última imagen", self.pausa)
         formulario.addRow("", self.usar_cpu)
+        formulario.addRow("Tipo de video", self.modo)
+        formulario.addRow("Rotación (vueltas)", self.vueltas)
 
         boton_previa = QtWidgets.QPushButton("Vista previa")
         boton_continuar = QtWidgets.QPushButton("Continuar video…")
@@ -356,19 +544,39 @@ class DialogoVideo(QtWidgets.QDialog):
 
         for w in (self.duracion, self.fps, self.pausa):
             w.valueChanged.connect(self._actualizar_resumen)
+        self.modo.currentIndexChanged.connect(self._actualizar_resumen)
+        self.resolucion.currentIndexChanged.connect(self._actualizar_resumen)
         self._actualizar_resumen()
 
     def config(self) -> ConfigVideo:
         ancho, alto = self.resoluciones[self.resolucion.currentText()]
         return ConfigVideo(ancho, alto, self.duracion.value(), self.fps.value(),
-                           self.suavizado.isChecked(), self.pausa.value(), self.usar_cpu.isChecked())
+                           self.suavizado.isChecked(), self.pausa.value(), self.usar_cpu.isChecked(),
+                           MODOS_VIDEO[self.modo.currentText()], self.vueltas.value())
 
     def _actualizar_resumen(self):
         c = self.config()
         texto = f"{c.cuadros_zoom} cuadros de zoom"
         if c.cuadros_pausa:
             texto += f" + {c.cuadros_pausa} de pausa"
-        self.resumen.setText(f"{texto}  ·  video de {formatear_duracion(c.cuadros / c.fps)}")
+        texto = f"{texto}  ·  video de {formatear_duracion(c.cuadros / c.fps)}"
+        rapido = c.modo == "exponencial"
+        self.vueltas.setEnabled(rapido)
+        if rapido:
+            # Cuánto se calcula con la tira contra cuadro por cuadro
+            try:
+                pedido = self.crear_pedido(c.ancho, c.alto)
+                geo = exponencial.geometria_tira(pedido, c.ancho, c.alto)
+                normal = c.cuadros_zoom * c.ancho * c.alto * (4 if pedido.opciones.antialiasing else 1)
+                razon = normal / geo.puntos
+                comparacion = (f"~{razon:.1f} veces menos cálculo" if razon >= 1.2 else
+                               "casi lo mismo: no conviene" if razon >= 0.85 else
+                               f"~{1 / razon:.1f} veces MÁS cálculo: para un zoom tan rápido conviene el modo normal")
+                texto += (f"\nTira de {geo.puntos / 1e6:,.0f} M puntos contra {normal / 1e6:,.0f} M "
+                          f"cuadro por cuadro ({comparacion})")
+            except Exception as e:
+                texto += f"\n{e}"
+        self.resumen.setText(texto)
 
     def _guardar_ajustes(self):
         self.ajustes.setValue("video/resolucion", self.resolucion.currentText())
@@ -377,6 +585,8 @@ class DialogoVideo(QtWidgets.QDialog):
         self.ajustes.setValue("video/suavizado", self.suavizado.isChecked())
         self.ajustes.setValue("video/pausa", self.pausa.value())
         self.ajustes.setValue("video/usar_cpu", self.usar_cpu.isChecked())
+        self.ajustes.setValue("video/modo", self.modo.currentText())
+        self.ajustes.setValue("video/vueltas", self.vueltas.value())
 
     def _vista_previa(self):
         c = self.config()

@@ -210,6 +210,8 @@ __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabl
                                     double bx_m, int bx_e, double by_m, int by_e,
                                     double sx_m, int sx_e, double sy_m, int sy_e,
                                     double paso_m, int paso_e, double k_re, double k_im,
+                                    const double* radio_m, const int* radio_e,
+                                    const double* cos_t, const double* sin_t, double dtheta_m, int dtheta_e,
                                     int width, int height, int fila0, int max_iter, int salidas,
                                     EstadoPixel<C, R>* estados, int iniciar, long long max_pasos,
                                     int* iter, float* suave, float* distancia, float* nx, float* ny,
@@ -218,9 +220,12 @@ __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabl
     int y = blockIdx.y * blockDim.y + threadIdx.y;
     if (x >= width || y >= height) return;
     int idx = y * width + x;
-    FE dc_re = fe_normalizar(bx_m, bx_e) + fe_normalizar(sx_m, sx_e) * fe((double)x);
-    FE dc_im = fe_normalizar(by_m, by_e) + fe_normalizar(sy_m, sy_e) * fe((double)(fila0 + y));
-    C dc = complejo_fe<C>(dc_re, dc_im);
+    // Grilla rectangular o polar (si radio_m no es nulo): igual que en la CPU
+    Grilla g = {fe_normalizar(bx_m, bx_e), fe_normalizar(by_m, by_e), fe_normalizar(sx_m, sx_e),
+                fe_normalizar(sy_m, sy_e), fe_normalizar(paso_m, paso_e),
+                radio_m, radio_e, cos_t, sin_t, fe_normalizar(dtheta_m, dtheta_e)};
+    FE paso_local;
+    C dc = dc_de_grilla<C>(g, x, fila0 + y, &paso_local);
 
     EstadoPixel<C, R> e;
     if (iniciar) {
@@ -238,7 +243,7 @@ __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabl
         return;
     }
     Pixel px = terminar_pixel<F, C, R>(e, dc, complejo<C>(k_re, k_im), max_iter, salidas,
-                                       convertir_paso<R>(fe_normalizar(paso_m, paso_e)));
+                                       real_de_fe<R>(paso_local));
     iter[idx] = px.n;
     if (salidas & SALIDA_SUAVE) suave[idx] = px.suave;
     if (salidas & SALIDA_DERIVADA) { distancia[idx] = px.distancia; nx[idx] = px.nx; ny[idx] = px.ny; }
@@ -247,12 +252,15 @@ __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabl
 #define ARGS(C, R) const C* Z, int largo, const Bla<C, R>* tabla, const int* off, const int* cnt, \
     int niveles, double bx_m, int bx_e, double by_m, int by_e, double sx_m, int sx_e, \
     double sy_m, int sy_e, double paso_m, int paso_e, double k_re, double k_im, \
+    const double* radio_m, const int* radio_e, const double* cos_t, const double* sin_t, \
+    double dtheta_m, int dtheta_e, \
     int width, int height, int fila0, int max_iter, int salidas, \
     EstadoPixel<C, R>* estados, int iniciar, long long max_pasos, \
     int* iter, float* suave, float* distancia, float* nx, float* ny, \
     unsigned long long* pasos, unsigned int* pendientes
 #define PASAR Z, largo, tabla, off, cnt, niveles, bx_m, bx_e, by_m, by_e, sx_m, sx_e, sy_m, sy_e, \
-    paso_m, paso_e, k_re, k_im, width, height, fila0, max_iter, salidas, estados, iniciar, max_pasos, \
+    paso_m, paso_e, k_re, k_im, radio_m, radio_e, cos_t, sin_t, dtheta_m, dtheta_e, \
+    width, height, fila0, max_iter, salidas, estados, iniciar, max_pasos, \
     iter, suave, distancia, nx, ny, pasos, pendientes
 
 // Tres kernels (double / floatexp / floatexp con mantisa float) por fórmula
@@ -285,13 +293,8 @@ def kernel_perturbacion(formula: str, modo: int):
         f"perturbacion_{formula}_{('double', 'floatexp', 'float')[modo]}"
     )
 
-# El paso entre píxeles llega como floatexp; en modo double se convierte
-_AYUDAS_GPU = r"""
-template<class R> __device__ R convertir_paso(FE p);
-template<> __device__ double convertir_paso<double>(FE p) { return a_double(p); }
-template<> __device__ FE convertir_paso<FE>(FE p) { return p; }
-template<> __device__ FF convertir_paso<FF>(FE p) { return ff_normalizar((float)p.m, p.e); }
-"""
+_AYUDAS_GPU = ""
+
 
 mandelbrot_espiral_kernel = cp.ElementwiseKernel(
     in_params='complex128 c, int32 max_iter',

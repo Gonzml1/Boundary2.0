@@ -179,8 +179,7 @@ EXPORT int pert_preparar_bla(void* h, int modo, double dc_max_m, int dc_max_e, d
 struct Salidas { int* iter; float* suave; float* distancia; float* nx; float* ny; };
 
 template<class F, class C, class R>
-static long long render(const Perturbacion* p, const C* Z, const Bla<C, R>* tabla,
-                        FE bx, FE by, FE sx, FE sy, R paso_pixel,
+static long long render(const Perturbacion* p, const C* Z, const Bla<C, R>* tabla, const Grilla& g,
                         int width, int height, int max_iter, int salidas, Salidas out,
                         volatile int* cancelar)
 {
@@ -190,13 +189,12 @@ static long long render(const Perturbacion* p, const C* Z, const Bla<C, R>* tabl
     #pragma omp parallel for schedule(dynamic, 1) reduction(+:pasos_total)
     for (int j = 0; j < height; ++j) {
         if (cancelar && *cancelar) continue;      // un pedido más nuevo lo reemplazó: se abandona
-        FE dc_im = by + sy * fe((double)j);
         long long pasos = 0;
         for (int i = 0; i < width; ++i) {
-            FE dc_re = bx + sx * fe((double)i);
+            FE paso;
+            C dc = dc_de_grilla<C>(g, i, j, &paso);
             Pixel px = iterar_pixel<F, C, R>(Z, p->largo, tabla, p->off, p->cnt, p->niveles,
-                                             complejo_fe<C>(dc_re, dc_im), k, max_iter,
-                                             salidas, paso_pixel, &pasos);
+                                             dc, k, max_iter, salidas, real_de_fe<R>(paso), &pasos);
             int idx = j * width + i;
             out.iter[idx] = px.n;
             if (out.suave) out.suave[idx] = px.suave;
@@ -208,18 +206,27 @@ static long long render(const Perturbacion* p, const C* Z, const Bla<C, R>* tabl
 }
 
 template<class F>
-static long long render_formula(const Perturbacion* p, FE bx, FE by, FE sx, FE sy, FE paso,
+static long long render_formula(const Perturbacion* p, const Grilla& g,
                                 int width, int height, int max_iter, int salidas, Salidas out,
                                 volatile int* cancelar)
 {
     if (p->modo == 0)
-        return render<F, CD, double>(p, p->Z_d.data(), p->bla_d.data(), bx, by, sx, sy, a_double(paso),
+        return render<F, CD, double>(p, p->Z_d.data(), p->bla_d.data(), g,
                                      width, height, max_iter, salidas, out, cancelar);
     if (p->modo == 1)
-        return render<F, CFE, FE>(p, p->Z_fe.data(), p->bla_fe.data(), bx, by, sx, sy, paso,
+        return render<F, CFE, FE>(p, p->Z_fe.data(), p->bla_fe.data(), g,
                                   width, height, max_iter, salidas, out, cancelar);
-    return render<F, CFF, FF>(p, p->Z_ff.data(), p->bla_ff.data(), bx, by, sx, sy,
-                              ff_normalizar((float)paso.m, paso.e), width, height, max_iter, salidas, out, cancelar);
+    return render<F, CFF, FF>(p, p->Z_ff.data(), p->bla_ff.data(), g,
+                              width, height, max_iter, salidas, out, cancelar);
+}
+
+static long long render_grilla(const Perturbacion* p, const Grilla& g, int width, int height, int max_iter,
+                               int salidas, Salidas out, volatile int* cancelar)
+{
+    // FORMULAS
+    switch (p->formula) {
+    default: return render_formula<Mandelbrot>(p, g, width, height, max_iter, salidas, out, cancelar);
+    }
 }
 
 // El píxel (i, j) tiene dc = (bx + i * sx, by + j * sy), todo pasado como (mantisa, exponente).
@@ -235,16 +242,31 @@ EXPORT long long pert_render(void* h,
     volatile int* cancelar)
 {
     const Perturbacion* p = static_cast<Perturbacion*>(h);
-    FE bx = fe_normalizar(bx_m, bx_e), by = fe_normalizar(by_m, by_e);
-    FE sx = fe_normalizar(sx_m, sx_e), sy = fe_normalizar(sy_m, sy_e);
-    FE paso = fe_normalizar(paso_m, paso_e);
+    Grilla g = {fe_normalizar(bx_m, bx_e), fe_normalizar(by_m, by_e),
+                fe_normalizar(sx_m, sx_e), fe_normalizar(sy_m, sy_e), fe_normalizar(paso_m, paso_e),
+                nullptr, nullptr, nullptr, nullptr, fe(0.0)};
     Salidas out = {iter,
                    (salidas & SALIDA_SUAVE) ? suave : nullptr,
                    (salidas & SALIDA_DERIVADA) ? distancia : nullptr, nx, ny};
-    // FORMULAS
-    switch (p->formula) {
-    default: return render_formula<Mandelbrot>(p, bx, by, sx, sy, paso, width, height, max_iter, salidas, out, cancelar);
-    }
+    return render_grilla(p, g, width, height, max_iter, salidas, out, cancelar);
+}
+
+// Lo mismo sobre una grilla polar (la tira del mapa exponencial): el punto de la columna i y la
+// fila j tiene dc = radio_j (cos_i, sin_i). width = cantidad de ángulos, height = de radios.
+EXPORT long long pert_render_polar(void* h,
+    const double* radio_m, const int* radio_e, const double* cos_t, const double* sin_t,
+    double dtheta_m, int dtheta_e,
+    int width, int height, int max_iter, int salidas,
+    int* iter, float* suave, float* distancia, float* nx, float* ny,
+    volatile int* cancelar)
+{
+    const Perturbacion* p = static_cast<Perturbacion*>(h);
+    Grilla g = {fe(0.0), fe(0.0), fe(0.0), fe(0.0), fe(0.0),
+                radio_m, radio_e, cos_t, sin_t, fe_normalizar(dtheta_m, dtheta_e)};
+    Salidas out = {iter,
+                   (salidas & SALIDA_SUAVE) ? suave : nullptr,
+                   (salidas & SALIDA_DERIVADA) ? distancia : nullptr, nx, ny};
+    return render_grilla(p, g, width, height, max_iter, salidas, out, cancelar);
 }
 
 // --- Para la GPU: tamaños y copia de la órbita y la tabla del modo actual ---

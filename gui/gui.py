@@ -528,6 +528,8 @@ class MainWindow(QMainWindow):
             texto = (f"Zoom desde el fractal entero hasta la vista elegida\n"
                      f"{config.cuadros} cuadros de {config.ancho}x{config.alto} "
                      f"({formatear_duracion(config.cuadros / config.fps)} de video)")
+            if config.modo == "exponencial":
+                texto += "\nModo rápido: primero se calcula la tira y después se arman los cuadros"
         else:
             texto = f"Rehaciendo {len(rehacer)} cuadros de {config.ancho}x{config.alto}"
         self.progreso_ui = DialogoProgresoVideo(texto, config.cuadros if rehacer is None else len(rehacer), self)

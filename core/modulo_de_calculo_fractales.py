@@ -84,6 +84,22 @@ def es_falta_de_memoria(error: Exception) -> bool:
                                     "OutOfMemory"))
 
 
+@dataclass
+class GrillaPolar:
+    """Puntos de una franja de la tira del mapa exponencial (ver core/exponencial.py): la columna i
+    y la fila j están en centro + radio_j (cos_i, sin_i)."""
+    centro: tuple                # (Decimal, Decimal): el centro del zoom, usado como referencia
+    radio_m: np.ndarray          # radio de cada fila = radio_m * 2**radio_e (float64 / int32)
+    radio_e: np.ndarray
+    cos_t: np.ndarray            # coseno y seno de cada columna (float64)
+    sin_t: np.ndarray
+    dtheta: tuple                # paso angular como (mantisa, exponente)
+    paso_min: Decimal            # separación más chica entre puntos de esta franja (elige double/floatexp)
+    paso_bits: Decimal           # la más chica de toda la tira: fija la precisión de la órbita, así
+                                 # todas las franjas comparten la misma órbita de referencia
+    e_radio_max: int             # exponente (base 2) del radio más grande
+
+
 class RenderCancelado(Exception):
     """El cálculo se abandonó porque llegó un pedido más nuevo (ver calculos_mandelbrot.cancelar)."""
 
@@ -238,6 +254,8 @@ class calculos_mandelbrot:
         self.pedir_derivada = False
         # Otro hilo la pone en 1 para abandonar el cálculo en curso (ver cancelar())
         self.bandera_cancelar = ctypes.c_int(0)
+        # Si no es None, la perturbación calcula esta grilla polar en vez de la imagen rectangular
+        self.grilla_polar: GrillaPolar | None = None
         # Pasos por lanzamiento en la GPU (se ajusta solo, ver _ajustar_pasos_por_lanzamiento)
         self._pasos_por_lanzamiento = PASOS_INICIALES_POR_LANZAMIENTO
         self._cache_orbita = None
@@ -388,15 +406,21 @@ class calculos_mandelbrot:
     modo_perturbacion = None         # None = automático, 0 = double, 1 = floatexp
 
     def _preparar_perturbacion(self, formula: str, modo_forzado: int | None = None):
-        c_re = (self.xmin_dec + self.xmax_dec) / 2
-        c_im = (self.ymin_dec + self.ymax_dec) / 2
-        # Mismo muestreo que np.linspace(xmin, xmax, width) del resto de los backends
-        step_x = (self.xmax_dec - self.xmin_dec) / max(1, self.width - 1)
-        step_y = (self.ymax_dec - self.ymin_dec) / max(1, self.height - 1)
-        paso = min(abs(step_x), abs(step_y))
+        polar = self.grilla_polar
+        if polar is None:
+            c_re = (self.xmin_dec + self.xmax_dec) / 2
+            c_im = (self.ymin_dec + self.ymax_dec) / 2
+            # Mismo muestreo que np.linspace(xmin, xmax, width) del resto de los backends
+            step_x = (self.xmax_dec - self.xmin_dec) / max(1, self.width - 1)
+            step_y = (self.ymax_dec - self.ymin_dec) / max(1, self.height - 1)
+            paso = min(abs(step_x), abs(step_y))
+        else:
+            # Tira del mapa exponencial: la referencia es el centro del zoom
+            c_re, c_im = polar.centro
+            paso = polar.paso_min
         if paso and paso.adjusted() < -(PRECISION_DECIMAL - 40):
             log.warning("Zoom más allá de la precisión de las coordenadas (paso %s)", f"{paso:.3e}")
-        bits = _bits_necesarios(paso)
+        bits = _bits_necesarios(paso if polar is None else polar.paso_bits)
         k_re, k_im = _a_decimal(self.real), _a_decimal(self.imag)
 
         # La calidad progresiva (low/medium/high) renderiza varias veces el mismo centro:
@@ -418,11 +442,16 @@ class calculos_mandelbrot:
 
         # Cota de |dc| en la imagen, redondeada hacia arriba a potencia de 2 para que la tabla
         # BLA sirva para todos los niveles de calidad (una cota mayor solo la hace más conservadora).
-        dx = max(abs(self.xmin_dec - c_re), abs(self.xmax_dec - c_re))
-        dy = max(abs(self.ymin_dec - c_im), abs(self.ymax_dec - c_im))
-        _, e = _a_floatexp(dx + dy)
+        if polar is None:
+            dx = max(abs(self.xmin_dec - c_re), abs(self.xmax_dec - c_re))
+            dy = max(abs(self.ymin_dec - c_im), abs(self.ymax_dec - c_im))
+            _, e = _a_floatexp(dx + dy)
+        else:
+            e = polar.e_radio_max
         orbita.preparar_bla(modo, (0.5, e + 1), self.bla_epsilon)
 
+        if polar is not None:
+            return orbita, modo, None
         dc = tuple(_a_floatexp(v) for v in
                    (self.xmin_dec - c_re, self.ymin_dec - c_im, step_x, step_y, paso))
         return orbita, modo, dc
@@ -465,11 +494,21 @@ class calculos_mandelbrot:
             iteraciones = np.empty(forma, dtype=np.int32)
             suave = np.empty(forma_extra(SALIDA_SUAVE), dtype=np.float32)
             distancia, nx, ny = (np.empty(forma_extra(SALIDA_DERIVADA), dtype=np.float32) for _ in range(3))
-            pasos = cpp.pert_render(
-                orbita.h, *dc[0], *dc[1], *dc[2], *dc[3], *dc[4],
-                self.width, self.height, self.max_iter, salidas,
-                iteraciones, suave, distancia, nx, ny, ctypes.byref(self.bandera_cancelar)
-            )
+            if self.grilla_polar is None:
+                pasos = cpp.pert_render(
+                    orbita.h, *dc[0], *dc[1], *dc[2], *dc[3], *dc[4],
+                    self.width, self.height, self.max_iter, salidas,
+                    iteraciones, suave, distancia, nx, ny, ctypes.byref(self.bandera_cancelar)
+                )
+            else:
+                g = self.grilla_polar
+                if cpp.pert_render_polar is None:
+                    raise RuntimeError("perturbacion.dll es de una versión vieja: recompilala con build_dlls.sh")
+                pasos = cpp.pert_render_polar(
+                    orbita.h, g.radio_m, g.radio_e, g.cos_t, g.sin_t, *g.dtheta,
+                    self.width, self.height, self.max_iter, salidas,
+                    iteraciones, suave, distancia, nx, ny, ctypes.byref(self.bandera_cancelar)
+                )
         else:
             Z, tabla, off, cnt = orbita.en_gpu()
             iteraciones = cp.empty(forma, dtype=cp.int32)
@@ -478,6 +517,16 @@ class calculos_mandelbrot:
             pasos_gpu = cp.zeros(1, dtype=cp.uint64)
             kernel = kernel_perturbacion(formula, modo)
             fe_args = lambda fe: [np.float64(fe[0]), np.int32(fe[1])]
+            if self.grilla_polar is None:
+                grilla_args = [*fe_args(dc[0]), *fe_args(dc[1]), *fe_args(dc[2]), *fe_args(dc[3]), *fe_args(dc[4]),
+                               np.float64(orbita.k[0]), np.float64(orbita.k[1]),
+                               np.uint64(0), np.uint64(0), np.uint64(0), np.uint64(0), np.float64(0), np.int32(0)]
+            else:
+                g = self.grilla_polar
+                cero = [np.float64(0), np.int32(0)]
+                grilla_args = [*cero * 5, np.float64(orbita.k[0]), np.float64(orbita.k[1]),
+                               _a_gpu(g.radio_m), _a_gpu(g.radio_e), _a_gpu(g.cos_t), _a_gpu(g.sin_t),
+                               *fe_args(g.dtheta)]
             tam_estado = cpp.pert_tam_estado(modo)
             # Cada render arranca con pocos pasos por lanzamiento y se ajusta sobre la marcha: si
             # se heredara el valor de un render liviano, el primer lanzamiento de uno pesado
@@ -503,8 +552,7 @@ class calculos_mandelbrot:
                     inicio = time.perf_counter()
                     kernel(grilla, bloque, (
                         Z, np.int32(orbita.largo), tabla, off, cnt, np.int32(orbita.niveles),
-                        *fe_args(dc[0]), *fe_args(dc[1]), *fe_args(dc[2]), *fe_args(dc[3]), *fe_args(dc[4]),
-                        np.float64(orbita.k[0]), np.float64(orbita.k[1]),
+                        *grilla_args,
                         np.int32(self.width), np.int32(filas), np.int32(fila), np.int32(self.max_iter),
                         np.int32(salidas), estados, np.int32(iniciar), np.int64(self._pasos_por_lanzamiento),
                         por_fila(iteraciones), por_fila(suave), por_fila(distancia), por_fila(nx), por_fila(ny),
