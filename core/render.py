@@ -13,7 +13,7 @@ from decimal import Decimal
 import numpy as np
 from PIL import Image
 
-from .modulo_de_calculo_fractales import calculos_mandelbrot, Resultado
+from .modulo_de_calculo_fractales import calculos_mandelbrot, Resultado, liberar_memoria_gpu, es_falta_de_memoria
 from .paletas import PALETTE_REGISTRY
 
 log = logging.getLogger(__name__)
@@ -93,7 +93,18 @@ class Renderizador:
             resultado, recalculado = guardado[2], False
             self._cache.move_to_end(clave)
         else:
-            resultado, recalculado = _calcular(self.motor, pedido, factor), True
+            try:
+                resultado = _calcular(self.motor, pedido, factor)
+            except Exception as e:
+                if not es_falta_de_memoria(e):
+                    raise
+                # Sin memoria (GPU o RAM bloqueada): se sueltan los cachés y se reintenta una vez
+                log.warning("Falta de memoria al calcular (%s): se libera memoria y se reintenta", e)
+                self._cache.clear()
+                self.motor._cache_orbita = None
+                liberar_memoria_gpu()
+                resultado = _calcular(self.motor, pedido, factor)
+            recalculado = True
             if self.tam_cache:
                 self._cache[clave] = (op.suave, op.iluminacion, resultado)
                 while len(self._cache) > self.tam_cache:

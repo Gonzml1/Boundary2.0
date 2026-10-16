@@ -62,6 +62,28 @@ def variante_rapida(fractal: str, metodo: str) -> str:
     return rapido if rapido in FRACTAL_REGISTRY.get(fractal, {}) else metodo
 
 
+def _a_gpu(arreglo: np.ndarray):
+    """Copia a la GPU sin pasar por la memoria "pinned" de CuPy: su pool nunca devuelve esa
+    memoria al sistema, y con órbitas y tablas de cientos de MB que cambian en cada cuadro de un
+    video terminaba agotándola (cudaErrorMemoryAllocation / cudaErrorAlreadyMapped)."""
+    en_gpu = cp.empty(arreglo.shape, dtype=arreglo.dtype)
+    en_gpu.set(arreglo)
+    return en_gpu
+
+
+def liberar_memoria_gpu() -> None:
+    """Devuelve al driver la memoria que CuPy tiene guardada en sus pools (sin uso)."""
+    if BACKENDS_DISPONIBLES.get("gpu"):
+        cp.get_default_memory_pool().free_all_blocks()
+        cp.get_default_pinned_memory_pool().free_all_blocks()
+
+
+def es_falta_de_memoria(error: Exception) -> bool:
+    texto = str(error)
+    return any(t in texto for t in ("cudaErrorMemoryAllocation", "out of memory", "cudaErrorAlreadyMapped",
+                                    "OutOfMemory"))
+
+
 class RenderCancelado(Exception):
     """El cálculo se abandonó porque llegó un pedido más nuevo (ver calculos_mandelbrot.cancelar)."""
 
@@ -164,7 +186,7 @@ class _OrbitaGMP:
             off = np.zeros(32, dtype=np.int32)
             cnt = np.zeros(32, dtype=np.int32)
             cpp.pert_exportar(self.h, orbita, tabla, off, cnt)
-            self._gpu = tuple(cp.asarray(x) for x in (orbita, tabla, off, cnt))
+            self._gpu = tuple(_a_gpu(x) for x in (orbita, tabla, off, cnt))
         return self._gpu
 
     def __del__(self):
@@ -381,6 +403,10 @@ class calculos_mandelbrot:
         # se reutiliza la órbita si no cambió nada que la afecte.
         clave = (formula, c_re, c_im, k_re, k_im, self.max_iter, bits)
         if self._cache_orbita is None or self._cache_orbita[0] != clave:
+            # Con muchas iteraciones la órbita y su tabla BLA ocupan cientos de MB (en RAM y en la
+            # GPU): se suelta la anterior antes de armar la nueva para que no convivan las dos
+            self._cache_orbita = None
+            liberar_memoria_gpu()
             self._cache_orbita = (clave, _OrbitaGMP(formula, c_re, c_im, k_re, k_im, self.max_iter, bits,
                                                     self.bandera_cancelar))
         orbita = self._cache_orbita[1]
