@@ -203,15 +203,25 @@ def _filas_para_cuadro(geo: GeometriaTira, ln_paso: float) -> tuple[int, int]:
 # ============================================================
 
 def armar_cuadro(geo: GeometriaTira, ln_paso: float, rotacion: float, cargar_franja, antialiasing: bool,
-                 xp=np) -> np.ndarray:
+                 xp=np, cache: dict | None = None) -> np.ndarray:
     """Arma un cuadro leyendo la tira. cargar_franja(i) devuelve la franja i como arreglo de xp.
-    Devuelve (alto, ancho, 3) uint8 con la fila 0 abajo (ymin), como el resto de la app."""
+    Devuelve (alto, ancho, 3) uint8 con la fila 0 abajo (ymin), como el resto de la app.
+    Con `cache` (un dict que se pasa siempre el mismo), las franjas unidas se reusan mientras los
+    cuadros sigan usando las mismas: en Full HD son ~40 franjas y unirlas en cada cuadro cuesta."""
     w, h, n = geo.ancho_px, geo.alto_px, geo.n_angulos
     k_lo, k_hi = _filas_para_cuadro(geo, ln_paso)
     f_lo, f_hi = k_lo // FILAS_POR_FRANJA, k_hi // FILAS_POR_FRANJA
-    banda = xp.concatenate([cargar_franja(f) for f in range(f_lo, f_hi + 1)], axis=0)
+    if cache is not None and cache.get("rango") == (f_lo, f_hi):
+        banda = cache["banda"]
+    else:
+        if cache is not None:
+            cache.clear()                     # que la banda anterior no ocupe memoria mientras se arma la nueva
+        banda = xp.concatenate([cargar_franja(f) for f in range(f_lo, f_hi + 1)], axis=0)
+        if cache is not None:
+            cache.update(rango=(f_lo, f_hi), banda=banda)
     filas_banda = banda.shape[0]
-    plano = banda.reshape(-1, 3).astype(xp.float32)
+    # Se queda en uint8: solo los colores que se leen pasan a float (los mismos valores, exactos)
+    plano = banda.reshape(-1, 3)
     inicio = f_lo * FILAS_POR_FRANJA
     k0 = (geo.ln_radio_max - ln_paso) / geo.du - inicio      # fila (en la banda) de radio = 1 píxel
 
@@ -230,10 +240,10 @@ def armar_cuadro(geo: GeometriaTira, ln_paso: float, rotacion: float, cargar_fra
         fc = (col - xp.floor(col))[..., None]
         c_sig = (c_ent + 1) % n
         k_sig = xp.minimum(k_ent + 1, filas_banda - 1)
-        a = plano[k_ent * n + c_ent]
-        b = plano[k_ent * n + c_sig]
-        c = plano[k_sig * n + c_ent]
-        d = plano[k_sig * n + c_sig]
+        a = plano[k_ent * n + c_ent].astype(xp.float32)
+        b = plano[k_ent * n + c_sig].astype(xp.float32)
+        c = plano[k_sig * n + c_ent].astype(xp.float32)
+        d = plano[k_sig * n + c_sig].astype(xp.float32)
         acumulado += (a * (1 - fc) + b * fc) * (1 - fk) + (c * (1 - fc) + d * fc) * fk
     rgb = xp.clip(acumulado / len(submuestras) + 0.5, 0, 255).astype(xp.uint8)
     return rgb.get() if hasattr(rgb, "get") else rgb

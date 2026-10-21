@@ -1,8 +1,14 @@
 #include <gmp.h>
 #include <stdlib.h>
 
+#ifdef _WIN32
+#define EXPORTAR __declspec(dllexport)
+#else      // Linux (render_nube/compilar_linux.sh)
+#define EXPORTAR __attribute__((visibility("default")))
+#endif
+
 extern "C" {
-    __declspec(dllexport) void calcular_mandelbrot_gmp_puro(
+    EXPORTAR void calcular_mandelbrot_gmp_puro(
         const char* xmin_str, const char* xmax_str, 
         const char* ymin_str, const char* ymax_str, 
         int width, int height, int max_iter, int prec_bits, int* output) 

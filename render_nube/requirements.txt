@@ -1,0 +1,5 @@
+# Lo que necesita el render sin interfaz (sin PyQt ni OpenGL).
+# CuPy lo instala instalar.sh según la versión de CUDA de la máquina (cupy-cuda12x o cupy-cuda13x).
+numpy>=2.0
+matplotlib>=3.8
+Pillow>=10

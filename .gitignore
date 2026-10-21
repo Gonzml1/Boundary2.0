@@ -6,9 +6,11 @@ env/
 
 # Artefactos de compilación (se generan con build_dlls.sh)
 *.dll
+*.so
 *.exe
 *.a
 *.o
 
 # Ubicaciones guardadas por el usuario
 favoritos.json
+.venv/

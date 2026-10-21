@@ -144,6 +144,13 @@ cada cuadro se arma deformando la tira (en GPU, ~5 ms por cuadro), sin calcular 
 Medido con un video de prueba de 20 cuadros en 960×540 a 20.000 iteraciones: 54,7 s antes de estas
 mejoras, 20 a 30 s con `perturbacion_gpu` + CPU y 16,6 s con `perturbacion_gpu_float`.
 
+#### Renderizar sin la app (o en la nube)
+
+`render_nube/` es un programa de consola que completa la carpeta de un video hasta el mp4, con los
+mismos cuadros que la app, usando todas las GPUs de la máquina. Sirve para alquilar una máquina con
+varias GPUs y bajar solo el video. En el diálogo, **Solo guardar el plan…** crea la carpeta con su
+`video.json` sin calcular nada. Ver [render_nube/README.md](render_nube/README.md).
+
 ### Favoritos
 
 "Guardar" en el panel de favoritos guarda la vista con todos sus dígitos, las iteraciones, el
@@ -167,6 +174,7 @@ core/paletas.py                      paletas de color
 core/video.py                        planificación del video de zoom y su plan guardado (video.json)
 core/exponencial.py                  modo rápido del video: la tira del mapa exponencial y el armado de cuadros
 core/favoritos.py                    ubicaciones guardadas
+render_nube/                         render de videos sin interfaz (consola, varias GPUs, Linux)
 codigos_cpp/                         fuentes C++ (perturbacion_core.h: núcleo compartido CPU/GPU)
 ```
 

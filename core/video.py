@@ -207,3 +207,43 @@ def armar_mp4(carpeta: str, fps: int, nombre: str = "zoom.mp4") -> str | None:
         log.error("ffmpeg falló: %s", resultado.stderr.strip())
         return None
     return salida
+
+
+# --- Comunes a la app y al render sin interfaz (render_nube/) ---
+
+def metodos_para_video(pedido, usar_cpu: bool) -> list[str]:
+    """Métodos que calculan los cuadros en paralelo: el elegido y, si es de GPU y existe, su
+    versión de CPU (dan la misma imagen, así que los cuadros se pueden repartir)."""
+    from .modulo_de_calculo_fractales import FRACTAL_REGISTRY
+    metodos = [pedido.tipo_calculo]
+    if usar_cpu and "_gpu" in pedido.tipo_calculo:
+        cpu = pedido.tipo_calculo.replace("_gpu", "_cpu")      # perturbacion_gpu_float -> perturbacion_cpu_float
+        if cpu in FRACTAL_REGISTRY.get(pedido.tipo_fractal, {}):
+            metodos.append(cpu)
+    return metodos
+
+
+def formatear_duracion(segundos: float) -> str:
+    segundos = max(0, round(segundos))
+    if segundos < 60:
+        return f"{segundos} s"
+    if segundos < 3600:
+        return f"{segundos // 60} min {segundos % 60:02d} s"
+    return f"{segundos // 3600} h {segundos % 3600 // 60:02d} min"
+
+
+def pedido_desde_plan(datos: dict, config: ConfigVideo):
+    """Rearma el PedidoRender guardado en el video.json de un video."""
+    from .paletas import PALETTE_REGISTRY
+    from .render import PedidoRender, OpcionesColor
+    nombres = [nombre for nombre, _ in PALETTE_REGISTRY]
+    paleta = nombres.index(datos["nombre_paleta"]) if datos.get("nombre_paleta") in nombres else datos["paleta"]
+    opciones = {**asdict(OpcionesColor()), **datos.get("opciones", {})}
+    if opciones.get("interior") is not None:
+        opciones["interior"] = tuple(opciones["interior"])
+    return PedidoRender(
+        Decimal(datos["xmin"]), Decimal(datos["xmax"]), Decimal(datos["ymin"]), Decimal(datos["ymax"]),
+        config.ancho, config.alto, datos["max_iter"], datos["tipo_fractal"], datos["tipo_calculo"],
+        datos.get("real", 0.0), datos.get("imag", 0.0), paleta, datos["clase_equiv"],
+        OpcionesColor(**opciones),
+    )

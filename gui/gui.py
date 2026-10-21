@@ -16,7 +16,7 @@ from core.modulo_de_calculo_fractales import FRACTAL_REGISTRY, METODOS_PROFUNDOS
 from core.modulo_opengl import MandelbrotWidget
 from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, OpcionesColor, guardar_imagen
-from core.video import crear_carpeta_video, cargar_plan
+from core.video import crear_carpeta_video, cargar_plan, guardar_plan
 from core import favoritos
 
 log = logging.getLogger(__name__)
@@ -522,6 +522,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Video", f"No se pudo crear la carpeta del video:\n{e}")
                 return
             pedido = self.mandelbrot.pedido_actual(config.ancho, config.alto)
+            if dialogo.accion == "plan":
+                guardar_plan(carpeta, pedido, config, PALETTE_REGISTRY[pedido.paleta][0])
+                log.info("Plan de video guardado en %s", carpeta)
+                QMessageBox.information(
+                    self, "Video",
+                    f"Plan guardado en:\n{carpeta}\n\nPara renderizarlo sin la app (en esta PC o en una máquina "
+                    f"con varias GPUs):\n  python render_nube/render_video.py \"{carpeta}\"\n\n"
+                    f"Los pasos para la nube están en render_nube/README.md.")
+                return
 
         self.statusBar().showMessage(f"Guardando el video en {carpeta}", 10000)
         if rehacer is None:
@@ -538,6 +547,7 @@ class MainWindow(QMainWindow):
         self.worker = WorkerVideo(pedido, carpeta, config, rehacer)
         self.worker.empezo.connect(self.progreso_ui.empezar)
         self.worker.progreso.connect(self.progreso_ui.actualizar)
+        self.worker.etapa_tira.connect(self.progreso_ui.fijar_tira)
         self.worker.terminado.connect(self._video_terminado)
         self.progreso_ui.cancelado.connect(self.worker.cancelar)
         self.worker.start()

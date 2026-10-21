@@ -40,7 +40,7 @@ def _lut(nombre: str, n: int, xp) -> np.ndarray:
     """La misma LUT, en la memoria de los datos (en GPU se sube una vez y se cachea)."""
     if xp is np:
         return _lut_cpu(nombre, n)
-    clave = (nombre, n)
+    clave = (nombre, n, xp.cuda.Device().id)      # una copia por GPU
     if clave not in _luts_gpu:
         _luts_gpu[clave] = xp.asarray(_lut_cpu(nombre, n))
     return _luts_gpu[clave]

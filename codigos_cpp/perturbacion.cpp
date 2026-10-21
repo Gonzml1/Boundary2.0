@@ -27,7 +27,11 @@
 #include <cstring>
 #include "perturbacion_core.h"
 
+#ifdef _WIN32
 #define EXPORT extern "C" __declspec(dllexport)
+#else      // Linux (render_nube/compilar_linux.sh)
+#define EXPORT extern "C" __attribute__((visibility("default")))
+#endif
 
 // FORMULAS: el número de cada una (tiene que coincidir con FORMULAS en Python)
 enum { FORMULA_MANDELBROT = 0 };

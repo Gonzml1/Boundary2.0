@@ -276,20 +276,21 @@ __device__ void render_perturbacion(const C* Z, int largo, const Bla<C, R>* tabl
 KERNELS_FORMULA(Mandelbrot, mandelbrot)
 """
 
-_modulo_perturbacion = None
+# Un módulo por GPU: con varias placas (render sin interfaz) cada una carga el suyo
+_modulos_perturbacion: dict[int, "cp.RawModule"] = {}
 
 def kernel_perturbacion(formula: str, modo: int):
-    """Kernel de la fórmula para el modo (0 = double, 1 = floatexp, 2 = floatexp con mantisa float).
-    Se compila la primera vez."""
-    global _modulo_perturbacion
-    if _modulo_perturbacion is None:
+    """Kernel de la fórmula para el modo (0 = double, 1 = floatexp, 2 = floatexp con mantisa float),
+    en la GPU actual. Se compila la primera vez."""
+    placa = cp.cuda.Device().id
+    if placa not in _modulos_perturbacion:
         with open(_RUTA_HEADER_PERTURBACION, encoding='utf-8') as f:
             header = f.read()
         # --fmad=false: mismo redondeo que la DLL de CPU (compilada con -ffp-contract=off), así
         # CPU y GPU dan resultados idénticos y el video puede repartir cuadros entre las dos
-        _modulo_perturbacion = cp.RawModule(code=header + _AYUDAS_GPU + _KERNELS_PERTURBACION,
-                                            options=('--fmad=false',))
-    return _modulo_perturbacion.get_function(
+        _modulos_perturbacion[placa] = cp.RawModule(code=header + _AYUDAS_GPU + _KERNELS_PERTURBACION,
+                                                    options=('--fmad=false',))
+    return _modulos_perturbacion[placa].get_function(
         f"perturbacion_{formula}_{('double', 'floatexp', 'float')[modo]}"
     )
 

@@ -22,11 +22,15 @@ BACKENDS_DISPONIBLES: dict[str, bool] = {}
 class CPPBackend:
     def __init__(self, dll_name: str, dll_dir: str = None):
         base_dir = dll_dir or RUTA_CPP
+        if os.name != "nt":
+            # Linux (render sin interfaz en la nube): las mismas bibliotecas compiladas como .so
+            # (ver render_nube/compilar_linux.sh); se las sigue nombrando como la DLL
+            dll_name = os.path.splitext(dll_name)[0] + ".so"
         dll_path = os.path.join(base_dir, dll_name)
         if not os.path.exists(dll_path):
             raise FileNotFoundError(f"DLL no encontrada: {dll_path}")
         try:
-            self.lib = ctypes.CDLL(dll_path, winmode=0)
+            self.lib = ctypes.CDLL(dll_path, winmode=0) if os.name == "nt" else ctypes.CDLL(dll_path)
         except OSError as e:
             raise RuntimeError(f"Error cargando {dll_name}: {e}")
 

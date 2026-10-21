@@ -23,7 +23,8 @@ from core.paletas import PALETTE_REGISTRY
 from core.render import Renderizador, PedidoRender, OpcionesColor, guardar_imagen
 from core import exponencial
 from core.video import (ConfigVideo, planificar_zoom, armar_mp4, nombre_cuadro, guardar_plan,
-                        cargar_plan, cuadros_hechos, cuadros_faltantes, describir_cuadros, leer_cuadros)
+                        cargar_plan, cuadros_hechos, cuadros_faltantes, describir_cuadros, leer_cuadros,
+                        metodos_para_video, formatear_duracion, pedido_desde_plan)
 
 log = logging.getLogger(__name__)
 
@@ -52,41 +53,6 @@ HILOS_GUARDADO = 2
 MAX_CUADROS_EN_ESPERA = 6
 
 
-def metodos_para_video(pedido: PedidoRender, usar_cpu: bool) -> list[str]:
-    """Métodos que calculan los cuadros en paralelo: el elegido y, si es de GPU y existe, su
-    versión de CPU (dan la misma imagen, así que los cuadros se pueden repartir)."""
-    metodos = [pedido.tipo_calculo]
-    if usar_cpu and "_gpu" in pedido.tipo_calculo:
-        cpu = pedido.tipo_calculo.replace("_gpu", "_cpu")      # perturbacion_gpu_float -> perturbacion_cpu_float
-        if cpu in FRACTAL_REGISTRY.get(pedido.tipo_fractal, {}):
-            metodos.append(cpu)
-    return metodos
-
-
-def formatear_duracion(segundos: float) -> str:
-    segundos = max(0, round(segundos))
-    if segundos < 60:
-        return f"{segundos} s"
-    if segundos < 3600:
-        return f"{segundos // 60} min {segundos % 60:02d} s"
-    return f"{segundos // 3600} h {segundos % 3600 // 60:02d} min"
-
-
-def pedido_desde_plan(datos: dict, config: ConfigVideo) -> PedidoRender:
-    """Rearma el pedido guardado en el video.json de un video."""
-    nombres = [nombre for nombre, _ in PALETTE_REGISTRY]
-    paleta = nombres.index(datos["nombre_paleta"]) if datos.get("nombre_paleta") in nombres else datos["paleta"]
-    opciones = {**asdict(OpcionesColor()), **datos.get("opciones", {})}
-    if opciones.get("interior") is not None:
-        opciones["interior"] = tuple(opciones["interior"])
-    return PedidoRender(
-        Decimal(datos["xmin"]), Decimal(datos["xmax"]), Decimal(datos["ymin"]), Decimal(datos["ymax"]),
-        config.ancho, config.alto, datos["max_iter"], datos["tipo_fractal"], datos["tipo_calculo"],
-        datos.get("real", 0.0), datos.get("imag", 0.0), paleta, datos["clase_equiv"],
-        OpcionesColor(**opciones),
-    )
-
-
 # ============================================================
 #                       HILOS DEL VIDEO
 # ============================================================
@@ -100,6 +66,9 @@ class WorkerVideo(QThread):
     - Con `rehacer` (índices desde 0) calcula solo esos cuadros, aunque ya existan."""
     empezo = pyqtSignal(int, int)    # cuadros ya hechos, total
     progreso = pyqtSignal(int, int)  # cuadros hechos, total
+    # Modo rápido: los primeros `franjas` pasos son las franjas de la tira (lentas); el resto, armar
+    # cuadros (rápido). El diálogo estima el tiempo de cada etapa por separado.
+    etapa_tira = pyqtSignal(int)     # franjas por calcular
     terminado = pyqtSignal(str)      # mensaje final
 
     def __init__(self, pedido: PedidoRender, carpeta: str, config: ConfigVideo,
@@ -243,6 +212,7 @@ class WorkerVideo(QThread):
         total = len(franjas) + len(cuadros) + len(pausa)
         self._hechos = 0
         self.empezo.emit(0, total)
+        self.etapa_tira.emit(len(franjas))
         log.info("Video rápido: tira de %d x %d (%d franjas por calcular), %d cuadros por armar",
                  geo.filas, geo.n_angulos, len(franjas), len(cuadros))
 
@@ -541,6 +511,10 @@ class DialogoVideo(QtWidgets.QDialog):
         boton_rehacer = QtWidgets.QPushButton("Rehacer cuadros…")
         boton_rehacer.setToolTip("Volver a calcular cuadros puntuales de un video ya hecho (por ejemplo, uno que se borró)")
         boton_rehacer.clicked.connect(self._rehacer)
+        boton_plan = QtWidgets.QPushButton("Solo guardar el plan…")
+        boton_plan.setToolTip("Crea la carpeta del video con su video.json, sin calcular nada: para renderizarlo "
+                              "con render_nube/render_video.py (por ejemplo, en una máquina alquilada con varias GPUs)")
+        boton_plan.clicked.connect(self._solo_plan)
         boton_renderizar = QtWidgets.QPushButton("Renderizar…")
         boton_cancelar = QtWidgets.QPushButton("Cancelar")
         boton_previa.clicked.connect(self._vista_previa)
@@ -551,7 +525,7 @@ class DialogoVideo(QtWidgets.QDialog):
         for b in (boton_previa, boton_continuar, boton_rehacer):
             botones.addWidget(b)
         botones.addStretch()
-        for b in (boton_renderizar, boton_cancelar):
+        for b in (boton_plan, boton_renderizar, boton_cancelar):
             botones.addWidget(b)
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -622,6 +596,11 @@ class DialogoVideo(QtWidgets.QDialog):
         self.accion = "renderizar"
         self.accept()
 
+    def _solo_plan(self):
+        self._guardar_ajustes()
+        self.accion = "plan"
+        self.accept()
+
     def _elegir_video(self, titulo: str):
         """Pide la carpeta de un video y devuelve (carpeta, config), o None."""
         carpeta = QtWidgets.QFileDialog.getExistingDirectory(
@@ -646,12 +625,31 @@ class DialogoVideo(QtWidgets.QDialog):
         if QtWidgets.QMessageBox.question(
                 self, "Continuar video",
                 f"Video de {config.ancho}x{config.alto}: hay {config.cuadros - len(faltan)}/{config.cuadros} "
-                f"cuadros hechos.\nFaltan: {describir_cuadros(faltan)}\n\n¿Calcular los que faltan?"
+                f"cuadros hechos.\nFaltan: {describir_cuadros(faltan)}{self._estado_tira(carpeta, config)}"
+                f"\n\n¿Calcular los que faltan?"
         ) != QtWidgets.QMessageBox.Yes:
             return
         self.carpeta_continuar = carpeta
         self.accion = "continuar"
         self.accept()
+
+    @staticmethod
+    def _estado_tira(carpeta: str, config: ConfigVideo) -> str:
+        """Modo rápido: cuánto de la tira ya está calculado (esas franjas se reusan al continuar)."""
+        if config.modo != "exponencial":
+            return ""
+        try:
+            datos, _ = cargar_plan(carpeta)
+            geo = exponencial.geometria_tira(pedido_desde_plan(datos, config), config.ancho, config.alto)
+            ln_pasos = exponencial.ln_pasos_cuadros(geo, config.cuadros_zoom, config.suavizado)
+            necesarias = {f for ln in ln_pasos for f in exponencial.franjas_para_cuadro(geo, ln)}
+            tira = os.path.join(carpeta, "tira")
+            hechas = sum(os.path.exists(exponencial.ruta_franja(tira, f)) for f in necesarias)
+        except Exception as e:
+            log.warning("No se pudo revisar la tira de %s: %s", carpeta, e)
+            return ""
+        return (f"\n\nModo rápido: la tira tiene {hechas}/{len(necesarias)} franjas calculadas. "
+                f"Se aprovechan y se sigue desde ahí; los cuadros se arman cuando termine la tira.")
 
     def _rehacer(self):
         elegido = self._elegir_video("Rehacer cuadros")
@@ -692,6 +690,7 @@ class DialogoProgresoVideo(QtWidgets.QDialog):
         self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
         self._terminado = False
         self._tiempos = deque(maxlen=self.VENTANA_TIEMPOS)
+        self._franjas = 0             # modo rápido: cuántos de los primeros pasos son franjas de la tira
 
         mensaje = QtWidgets.QLabel(texto)
         mensaje.setAlignment(Qt.AlignCenter)
@@ -717,16 +716,36 @@ class DialogoProgresoVideo(QtWidgets.QDialog):
         self._tiempos.append((time.monotonic(), hechos))
         self.actualizar(hechos, total)
 
+    def fijar_tira(self, franjas: int) -> None:
+        """Modo rápido: los primeros `franjas` pasos son la tira. Una franja tarda muchísimo más que
+        armar un cuadro, así que el tiempo restante se estima para cada etapa por separado (si no, el
+        tiempo de las franjas se multiplicaba por los miles de cuadros y daba cientos de horas)."""
+        self._franjas = franjas
+        self.actualizar(self.barra.value(), self.barra.maximum())
+
     def actualizar(self, actual: int, total: int) -> None:
-        self.barra.setMaximum(total)
+        en_tira = actual < self._franjas
+        if self._franjas and not en_tira and self._tiempos and self._tiempos[0][1] < self._franjas:
+            # Terminó la tira: el ritmo de los cuadros se mide de nuevo
+            self._tiempos.clear()
+            self._tiempos.append((time.monotonic(), actual))
+        if en_tira:
+            self.barra.setRange(0, self._franjas)
+            texto = f"Tira: {actual}/{self._franjas} franjas"
+            hasta = self._franjas
+        else:
+            self.barra.setRange(self._franjas, total)
+            texto = f"{actual - self._franjas}/{total - self._franjas} imágenes" if self._franjas else f"{actual}/{total} imágenes"
+            hasta = total
         self.barra.setValue(actual)
-        texto = f"{actual}/{total} imágenes"
         if actual and self._tiempos and self._tiempos[-1][1] != actual:
             self._tiempos.append((time.monotonic(), actual))
         if len(self._tiempos) >= 2:
             (t0, a0), (t1, a1) = self._tiempos[0], self._tiempos[-1]
             if a1 > a0:
-                texto += f"  ·  faltan ~{formatear_duracion((t1 - t0) / (a1 - a0) * (total - actual))}"
+                texto += f"  ·  faltan ~{formatear_duracion((t1 - t0) / (a1 - a0) * (hasta - actual))}"
+                if en_tira:
+                    texto += f" de tira (después se arman {total - self._franjas} cuadros, rápido)"
         self.contador.setText(texto)
 
     def _cancelar(self) -> None:
